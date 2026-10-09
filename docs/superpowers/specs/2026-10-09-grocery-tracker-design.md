@@ -21,8 +21,8 @@ The initial bottom tabs are **Home**, **Total Spending**, and **Catalog**. Catal
 
 ## Two ways to add a product
 
-1. **Catalog only:** On Products, scan or type a code, enter a product name, and choose or create its brand and category. Saving puts it in the catalog for future scans. It does not change spending. From the saved product, **Record purchase** can open the monthly purchase form if the user also bought it.
-2. **While recording spending:** On Total Spending, choose a month and tap Add. Scan a code or search/select a product manually. A known code fills in the product identity, brand, and category. A new code stays on the form while the user enters the product name and chooses or creates brand and category. The user chooses or creates a store, enters quantity and the price paid per unit, then saves. One save creates any new catalog records and the purchase together, then returns to that month's list.
+1. **Catalog only:** On Products, scan or type a code, enter a product name, and choose or create its brand and category. An unknown scan shows these manual fields on the same scanning page. Saving puts the product in the catalog for future scans. It does not change spending. From the saved product, **Record purchase** can open the monthly purchase form if the user also bought it.
+2. **While recording spending:** On Total Spending, choose a month and tap Add. Scan a code or search/select a product manually. A known code fills in the product identity, brand, and category. An unknown code, including an unknown QR code, stays visible while the scanning page shows manual fields for product name, brand, and category. The user chooses or creates a store, enters a whole-item quantity and the price paid per unit, then saves. One save creates any new catalog records and the purchase together, then returns to that month's list.
 
 For either flow, a denied camera permission or an unreadable label leaves manual code entry and product search available. A scan is handled once per form opening so a camera callback cannot add duplicate purchases. Repeated purchases of the same product remain separate entries, because store and price can differ.
 
@@ -41,7 +41,7 @@ The app uses Expo SQLite as the single local database. Expo Router provides the 
 
 The purchase entry owns the price: editing a catalog product never rewrites what was paid. Its category ID is recorded at purchase time so changing a product's category later does not move old spending between categories. The purchase correction form can fix a mistaken category on that entry. Product and store names remain linked to catalog records so a spelling correction appears everywhere, including older entries. Monthly totals are calculated from purchase entries, never stored in a second totals table. A product, brand, category, or store used in purchases cannot be deleted in a way that erases history.
 
-The first version treats quantity as a positive whole number of items and price as the amount for one item; line total is quantity × unit price. Prices are stored as integer baisa to avoid floating-point totals. The quantity choice still needs confirmation before implementation.
+Quantity is a positive whole number of items and price is the amount for one item; line total is quantity × unit price. Prices are stored as integer baisa to avoid floating-point totals.
 
 For matching, standard retail UPC/EAN barcodes that represent the same product number share one lookup key, while QR content is treated as an opaque code. The app never opens a scanned QR URL. Retail codes are checked for valid length and check digit; QR content is limited to a reasonable length and shown before saving. A kind/key pair cannot identify two products. The first-time scan save is one transaction: either product, new brand/category/store, and purchase all save, or none do.
 
@@ -65,12 +65,13 @@ Two shapes were compared. A pure catalog model stores only links in purchases; i
 ## Confirmed decisions
 
 - Scanning supports both standard grocery UPC/EAN barcodes and QR codes.
+- An unknown QR code opens manual product details on the same scanning page.
 - The first version uses OMR only, with no currency selector or conversion.
+- Quantity is a whole-item count; weights and volumes are outside the first version.
 
 ## Decisions to confirm before app code
 
-1. Does quantity need weights or volumes such as **0.5 kg**, or is a whole-number item count enough?
-2. When adding a product in the catalog, should price and store be saved as suggestions for later purchases, or is the **Record purchase** action enough? This draft keeps price and store on purchases only.
+1. When adding a product in the catalog, should price and store be saved as suggestions for later purchases, or is the **Record purchase** action enough? This draft keeps price and store on purchases only.
 
 ## First implementation slice after approval
 
