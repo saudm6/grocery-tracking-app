@@ -14,7 +14,7 @@ const formats: { value: CodeFormat | 'none'; label: string }[] = [
   { value: 'ean8', label: 'EAN-8 (8 digits)' }, { value: 'ean13', label: 'EAN-13 (13 digits)' }, { value: 'qr', label: 'QR (exact text)' },
 ];
 
-function ProductEditor({ product, references, readError, refresh }: { product: ProductDetails | null; references: References; readError: string; refresh: () => void }) {
+function ProductEditor({ product, references, readError, refresh, month }: { product: ProductDetails | null; references: References; readError: string; refresh: () => void; month?: string }) {
   const grocery = useGrocery();
   const [name, setName] = useState(product?.name ?? '');
   const [brand, setBrand] = useState<Reference>(product?.brandId ? { id: product.brandId } : { name: '' });
@@ -50,7 +50,7 @@ function ProductEditor({ product, references, readError, refresh }: { product: P
         const productId = await grocery.saveProduct({ id: product?.id, name, brand: brand.id !== undefined || brand.name.trim() ? brand : null, grouping,
           savedPrice: price, savedStore: store.id !== undefined || store.name.trim() ? store : null,
           code: format === 'none' ? undefined : { format, value: code }, notInflation: canExclude && notInflation });
-        router.dismissTo({ pathname: '/product/[id]', params: { id: productId } });
+        router.dismissTo({ pathname: '/product/[id]', params: { id: productId, ...(month === undefined ? {} : { month }) } });
         return productId;
       });
     } catch (failure) {
@@ -63,7 +63,7 @@ function ProductEditor({ product, references, readError, refresh }: { product: P
   return <>
     <Text accessibilityRole="header" style={{ fontSize: 22 }}>{product ? 'Edit product' : 'Add product'}</Text>
     <Text>This saves catalog defaults without recording a purchase or changing spending.</Text>
-    {product?.archived ? <><ErrorMessage message="This product is archived. Reactivate it from its details before editing. Your entries are kept." /><Action label="Open archived product details" onPress={() => router.dismissTo({ pathname: '/product/[id]', params: { id: product.id } })} /></> : null}
+    {product?.archived ? <><ErrorMessage message="This product is archived. Reactivate it from its details before editing. Your entries are kept." /><Action label="Open archived product details" onPress={() => router.dismissTo({ pathname: '/product/[id]', params: { id: product.id, ...(month === undefined ? {} : { month }) } })} /></> : null}
     <Field label="Product name" value={name} onChangeText={setName} editable={editing} autoFocus />
     <ReferenceField label="Brand (optional)" kind="brand" value={brand} rows={references.brands} onChange={setBrand} editable={editing} />
     <Action label="Use no brand" disabled={!editing} onPress={() => setBrand({ name: '' })} />
@@ -80,7 +80,7 @@ function ProductEditor({ product, references, readError, refresh }: { product: P
       <Field label={format === 'qr' ? 'QR content (exact text)' : 'Product code (including check digit)'} value={code} onChangeText={(value) => { clearOwner(); setCode(value); }} editable={editing} autoCapitalize="none" autoCorrect={false} multiline={format === 'qr'} />
       {format === 'qr' ? <Text selectable>QR preview · {JSON.stringify(code)}</Text> : <Text>Enter all digits without spaces or separators. UPC-E needs its full 8 digits.</Text>}
     </> : null}
-    {owner ? <><Text>This code identifies {owner.name}{owner.archived ? ' · Archived. Reactivate its existing identity from details.' : '.'}</Text><Action label={`Open code owner ${owner.name}`} onPress={() => router.push({ pathname: '/product/[id]', params: { id: owner.id } })} /></> : null}
+    {owner ? <><Text>This code identifies {owner.name}{owner.archived ? ' · Archived. Reactivate its existing identity from details.' : '.'}</Text><Action label={`Open code owner ${owner.name}`} onPress={() => router.push({ pathname: '/product/[id]', params: { id: owner.id, ...(month === undefined ? {} : { month }) } })} /></> : null}
     {ownerError ? <><ErrorMessage message={ownerError} /><Action label="Retry code owner lookup" onPress={checkOwner} /></> : null}
     {error ? <ErrorMessage message={error} /> : null}
     <Action label={saving ? 'Saving product…' : 'Save product'} disabled={!editing || !!readError} onPress={() => { void save(); }} />
@@ -88,7 +88,7 @@ function ProductEditor({ product, references, readError, refresh }: { product: P
 }
 
 export default function ProductEdit() {
-  const params = useLocalSearchParams<{ id?: string }>();
+  const params = useLocalSearchParams<{ id?: string; month?: string }>();
   const productId = params.id === undefined ? undefined : Number(params.id);
   const grocery = useGrocery();
   const [loaded, setLoaded] = useState<{ references: References; product: ProductDetails | null } | null>(null);
@@ -105,7 +105,7 @@ export default function ProductEdit() {
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={process.env.EXPO_OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={88}>
     <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, gap: 16, paddingBottom: 40 }}>
       {readError ? <><ErrorMessage message={readError} /><Action label="Retry product choices" onPress={refresh} /></> : loaded === null ? <ActivityIndicator accessibilityLabel="Loading product choices" /> : null}
-      {loaded ? <ProductEditor key={productId ?? 'new'} product={loaded.product} references={loaded.references} readError={readError} refresh={refresh} /> : null}
+      {loaded ? <ProductEditor key={productId ?? 'new'} product={loaded.product} references={loaded.references} readError={readError} refresh={refresh} month={params.month} /> : null}
     </ScrollView>
   </KeyboardAvoidingView>;
 }

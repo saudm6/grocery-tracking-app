@@ -1,7 +1,8 @@
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, ScrollView, Text } from 'react-native';
 import { Action, ErrorMessage, Field } from '../components/form';
+import { ProductRow } from '../components/product-row';
 import type { ProductSummary } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 
@@ -25,10 +26,8 @@ export default function Products() {
     <Action label={includeArchived ? 'Hide archived products' : 'Show archived products'} onPress={() => setIncludeArchived((shown) => !shown)} />
     <Action label="Add product" onPress={() => router.push('/product-edit')} />
     {error ? <><ErrorMessage message={error} /><Action label="Retry products" onPress={refresh} /></> : rows === null ? <ActivityIndicator accessibilityLabel="Loading products" /> : null}
-    {rows?.length === 0 ? <Text>{search.trim() ? 'No matching products. Change the search or add a product.' : 'No products here yet. Add one with or without a code.'}</Text> : rows?.map((product) => <View key={product.id} style={{ padding: 16, gap: 8, borderWidth: 1, borderColor: '#657469', borderRadius: 10, backgroundColor: '#fff' }}>
-      <Text selectable style={{ fontSize: 20, color: '#17251b' }}>{product.name}</Text>
-      <Text selectable>Brand · {product.brand ?? 'No brand'}{product.archived ? ' · Archived' : ''}</Text>
+    {rows?.length === 0 ? <Text>{search.trim() ? 'No matching products. Change the search or add a product.' : 'No products here yet. Add one with or without a code.'}</Text> : rows?.map((product) => <ProductRow key={product.id} product={product}>
       <Action label={`Open ${product.archived ? 'archived ' : ''}product ${product.name}`} onPress={() => router.push({ pathname: '/product/[id]', params: { id: product.id } })} />
-    </View>)}
+    </ProductRow>)}
   </ScrollView>;
 }
