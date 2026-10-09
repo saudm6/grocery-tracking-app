@@ -37,11 +37,11 @@ The app uses Expo SQLite as the single local database. Expo Router provides the 
 | Store | ID, unique name |
 | Product | ID, name, optional brand ID, optional category ID, archived status |
 | Product code | Product ID, code kind, original code, lookup key; each kind/key pair identifies one product, and one product may have more than one code |
-| Purchase entry | ID, product ID, store ID, chosen year-month, category ID at purchase time, quantity, unit price in the currency's smallest unit, creation time |
+| Purchase entry | ID, product ID, store ID, chosen year-month, category ID at purchase time, quantity, unit price in baisa, creation time |
 
 The purchase entry owns the price: editing a catalog product never rewrites what was paid. Its category ID is recorded at purchase time so changing a product's category later does not move old spending between categories. The purchase correction form can fix a mistaken category on that entry. Product and store names remain linked to catalog records so a spelling correction appears everywhere, including older entries. Monthly totals are calculated from purchase entries, never stored in a second totals table. A product, brand, category, or store used in purchases cannot be deleted in a way that erases history.
 
-The first version treats quantity as a positive whole number of items and price as the amount for one item; line total is quantity × unit price. Money is stored as integer minor units to avoid floating-point totals. The proposed starting currency is OMR, whose smallest unit is the baisa. The quantity and currency choices need confirmation before implementation.
+The first version treats quantity as a positive whole number of items and price as the amount for one item; line total is quantity × unit price. Prices are stored as integer baisa to avoid floating-point totals. The quantity choice still needs confirmation before implementation.
 
 For matching, standard retail UPC/EAN barcodes that represent the same product number share one lookup key, while QR content is treated as an opaque code. The app never opens a scanned QR URL. Retail codes are checked for valid length and check digit; QR content is limited to a reasonable length and shown before saving. A kind/key pair cannot identify two products. The first-time scan save is one transaction: either product, new brand/category/store, and purchase all save, or none do.
 
@@ -62,15 +62,15 @@ The monthly view and Home query the same purchase entries. Changing an entry's m
 
 Two shapes were compared. A pure catalog model stores only links in purchases; it is smaller but recategorizing a product would silently rewrite older category totals. A full purchase snapshot copies every product and store label into each entry; it preserves old labels but adds duplicated data and more rules for edits. The proposed design uses the purchase-ledger candidate for historical price and category accuracy, with the catalog-first candidate's month-only entry flow and lean Home analytics. It keeps the reusable catalog, records price and category on each purchase, and derives analytics from those entries. Product and store renames remain visible in old entries by design.
 
-## Confirmed decision
+## Confirmed decisions
 
-Scanning supports both standard grocery UPC/EAN barcodes and QR codes.
+- Scanning supports both standard grocery UPC/EAN barcodes and QR codes.
+- The first version uses OMR only, with no currency selector or conversion.
 
 ## Decisions to confirm before app code
 
-1. Is **OMR** the only currency needed at first?
-2. Does quantity need weights or volumes such as **0.5 kg**, or is a whole-number item count enough?
-3. When adding a product in the catalog, should price and store be saved as suggestions for later purchases, or is the **Record purchase** action enough? This draft keeps price and store on purchases only.
+1. Does quantity need weights or volumes such as **0.5 kg**, or is a whole-number item count enough?
+2. When adding a product in the catalog, should price and store be saved as suggestions for later purchases, or is the **Record purchase** action enough? This draft keeps price and store on purchases only.
 
 ## First implementation slice after approval
 
