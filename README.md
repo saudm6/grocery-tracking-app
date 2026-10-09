@@ -12,6 +12,12 @@ Home analytics, Inflation reports, catalog management, codes, and scanning follo
 
 Uninstalling the app or losing the device can lose local records. This version has no backup or cloud synchronization.
 
+The **iOS Simulator** GitHub workflow builds an unsigned Release app on the standard `macos-26-intel` runner with Xcode 26.6 and iOS 26.5. It installs the actual native app with its embedded JavaScript bundle, runs the real purchase form through pinned local Maestro, verifies validation and relaunch persistence, and reads the installed app's SQLite file. A bounded offline phase withdraws external network interfaces on that disposable runner while preserving loopback. An exit trap and independent timed guard restore connectivity before evidence upload. The script refuses to run native or network operations on a local host.
+
+PR runs build the exact PR head. After the workflow lands on main, a manual run accepts a full `source_sha`. The artifact includes source/tool versions, native build results and app archive, UI assertions/screenshots, network probes and restoration log, and SQLite checks. Review `receipt.json`, `network/`, `maestro/`, and `database-proof.json` together. A screenshot or JavaScript export alone does not prove a native or offline pass. Simulator evidence does not cover a physical camera or spoken screen-reader behavior.
+
+Locally check the helpers with `npm test`, `node tests/native/assert-ios-db.mjs --self-test`, and `bash scripts/verify-ios-simulator.sh --self-test`. These self-tests use a temporary database and mocked interface commands; they do not change host networking. The native workflow is a prerequisite for issue #18. Its smoke covers this first purchase slice; the final app audit follows the feature issues.
+
 First-version design: [Grocery tracker app design](docs/superpowers/specs/2026-10-09-grocery-tracker-design.md).
 
 Implementation plan: [First-version backlog](docs/implementation-backlog.md).

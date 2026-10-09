@@ -1,0 +1,94 @@
+appId: com.saudm6.grocerytracker
+name: Offline manual purchase and persistent restart
+---
+- launchApp:
+    clearState: false
+- assertVisible: Home
+- assertVisible: Total Spending
+- assertVisible: Inflation
+- assertVisible: Catalog
+- tapOn: Total Spending
+- assertVisible: No purchases in this month.*
+- tapOn: Add purchase
+- tapOn:
+    text: Product name
+    index: 1
+- inputText: IOSSmokeMilk
+- tapOn:
+    text: 'Brand \(optional\)'
+    index: 1
+- inputText: IOSSmokeBrand
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      text: Category
+    direction: DOWN
+- tapOn:
+    text: Category
+    index: 1
+- inputText: IOSSmokeDairy
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      text: Store
+    direction: DOWN
+- tapOn:
+    text: Store
+    index: 1
+- inputText: IOSSmokeStore
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      text: 'Quantity \(whole items\)'
+    direction: DOWN
+- tapOn:
+    text: 'Quantity \(whole items\)'
+    index: 1
+- eraseText
+- inputText: '0'
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      text: 'Unit price \(OMR\)'
+    direction: DOWN
+- tapOn:
+    text: 'Unit price \(OMR\)'
+    index: 1
+- inputText: '0.001'
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      text: Save purchase
+    direction: DOWN
+- tapOn: Save purchase
+- assertVisible: Quantity must be a positive safe whole number.*Your entries are kept.*
+- takeScreenshot: invalid-quantity
+- scrollUntilVisible:
+    element:
+      text: 'Quantity \(whole items\)'
+    direction: UP
+- tapOn:
+    text: 'Quantity \(whole items\)'
+    index: 1
+- eraseText
+- inputText: '3'
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      text: Save purchase
+    direction: DOWN
+- assertVisible: Line total.*0.003 OMR
+- tapOn: Save purchase
+- assertVisible: '${MONTH} total.*0.003 OMR'
+- assertVisible: IOSSmokeMilk
+- assertVisible: Line total.*0.003 OMR
+- takeScreenshot: saved-purchase
+- stopApp
+- launchApp:
+    clearState: false
+- tapOn: Total Spending
+- assertVisible: '${MONTH} total.*0.003 OMR'
+- assertVisible: IOSSmokeMilk
+- assertVisible: 3 items.*0.001 OMR each
+- takeScreenshot: persistent-restart
+- stopApp

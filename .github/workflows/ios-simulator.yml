@@ -1,0 +1,57 @@
+name: iOS Simulator
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact commit to build and verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-simulator-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-ios:
+    runs-on: macos-26-intel
+    timeout-minutes: 55
+    env:
+      EXPECTED_SHA: ${{ inputs.source_sha || github.event.pull_request.head.sha || github.sha }}
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      CI: '1'
+      EXPO_NO_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Check source and proof helpers
+        run: |
+          npm run typecheck
+          npm run lint
+          npm test
+          node tests/native/assert-ios-db.mjs --self-test
+          bash scripts/verify-ios-simulator.sh --self-test
+      - name: Build and exercise the native Release app
+        run: bash scripts/verify-ios-simulator.sh
+      - name: Upload native evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-simulator-${{ env.EXPECTED_SHA }}
+          path: ${{ runner.temp }}/grocery-ios-evidence/
+          if-no-files-found: warn
+          retention-days: 14

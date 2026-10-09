@@ -7,7 +7,7 @@
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "ios": { "supportsTablet": true },
+    "ios": { "supportsTablet": true, "bundleIdentifier": "com.saudm6.grocerytracker" },
     "android": { "softwareKeyboardLayoutMode": "resize", "package": "com.saudm6.grocerytracker" },
     "plugins": ["expo-router", "expo-sqlite"]
   }
