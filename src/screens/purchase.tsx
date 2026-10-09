@@ -2,15 +2,17 @@ import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { KeyboardAvoidingView, ScrollView, Text } from 'react-native';
 import { Action, ErrorMessage, Field } from '../components/form';
+import { GroupingField } from '../components/grouping-field';
 import { ReferenceField } from '../components/reference-field';
-import { formatOMR, lineTotal, localDate, parseOMR, parseQuantity, referenceNameKey, type Reference, type ReferenceRow, type References } from '../data/grocery';
+import { formatOMR, lineTotal, localDate, parseOMR, parseQuantity, type Grouping, type Reference, type References } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 import { createSubmission } from '../data/submission';
 
 export default function Purchase() {
   const params = useLocalSearchParams<{ month?: string }>();
   const grocery = useGrocery();
-  const [draft, setDraft] = useState({ month: typeof params.month === 'string' ? params.month : localDate().slice(0, 7), name: '', category: '', quantity: '1', price: '', date: '' });
+  const [draft, setDraft] = useState({ month: typeof params.month === 'string' ? params.month : localDate().slice(0, 7), name: '', quantity: '1', price: '', date: '' });
+  const [grouping, setGrouping] = useState<Grouping>({ category: { name: '' } });
   const [brand, setBrand] = useState<Reference>({ name: '' });
   const [store, setStore] = useState<Reference>({ name: '' });
   const [status, setStatus] = useState<'editing' | 'saving'>('editing');
@@ -29,25 +31,12 @@ export default function Purchase() {
   const set = (key: keyof typeof draft) => (value: string) => setDraft((previous) => ({ ...previous, [key]: value }));
   let preview = '';
   try { preview = `${formatOMR(lineTotal(parseQuantity(draft.quantity), parseOMR(draft.price)))} OMR`; } catch {}
-  const selection = (text: string, rows: ReferenceRow[]): Reference => {
-    try {
-      const key = referenceNameKey(text);
-      const saved = rows.find((row) => row.nameKey === key);
-      if (saved) return { id: saved.id };
-    } catch {}
-    return { name: text };
-  };
-  const hint = (text: string, rows: ReferenceRow[], kind: string) => {
-    if (!text.trim()) return null;
-    const selected = selection(text, rows);
-    return <Text>{selected.id ? `Use saved ${kind} · ${rows.find((row) => row.id === selected.id)!.name}` : `Create new ${kind} · ${text.trim()}`}</Text>;
-  };
   const save = async () => {
     try {
       await submit(async () => {
         if (!references) throw new Error('Wait for saved references to load.');
         setError('');
-        const result = await grocery.recordPurchase({ product: { name: draft.name, brand: brand.id !== undefined || brand.name.trim() ? brand : null, grouping: { category: selection(draft.category, references.categories) } }, store, month: draft.month.trim(), purchaseDate: draft.date.trim(), quantity: draft.quantity, unitPrice: draft.price });
+        const result = await grocery.recordPurchase({ product: { name: draft.name, brand: brand.id !== undefined || brand.name.trim() ? brand : null, grouping }, store, month: draft.month.trim(), purchaseDate: draft.date.trim(), quantity: draft.quantity, unitPrice: draft.price });
         router.back();
         return result;
       });
@@ -56,12 +45,11 @@ export default function Purchase() {
   const editing = status === 'editing';
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={process.env.EXPO_OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={88}>
     <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, gap: 16, paddingBottom: 40 }}>
-      <Text>Enter one new product and the price paid for each item. Choose saved brands and stores or enter new names.</Text>
+      <Text>Enter one new product and the price paid for each item. Choose saved references or enter new names.</Text>
       <Field label="Purchase month (YYYY-MM)" value={draft.month} editable={false} />
       <Field label="Product name" value={draft.name} onChangeText={set('name')} editable={editing} autoFocus />
       <ReferenceField label="Brand (optional)" kind="brand" value={brand} onChange={setBrand} rows={references?.brands ?? []} editable={editing} />
-      <Field label="Category" value={draft.category} onChangeText={set('category')} editable={editing} />
-      {references ? hint(draft.category, references.categories, 'category') : null}
+      {references ? <GroupingField value={grouping} references={references} onChange={setGrouping} editable={editing} /> : null}
       <ReferenceField label="Store" kind="store" value={store} onChange={setStore} rows={references?.stores ?? []} editable={editing} />
       <Field label="Quantity (whole items)" value={draft.quantity} onChangeText={set('quantity')} editable={editing} keyboardType="number-pad" />
       <Field label="Unit price (OMR)" value={draft.price} onChangeText={set('price')} editable={editing} keyboardType="decimal-pad" placeholder="0.000" />

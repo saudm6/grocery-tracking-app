@@ -418,6 +418,11 @@ test('catalog and purchase inline grouping drafts commit completely or roll back
     await assert.rejects(grocery.saveProduct(catalog({ name: 'Bad parent draft', grouping: { subcategory: { name: 'New child', parentCategory: { name: ' DAIRY ' } } } })), /already exists/);
     await assert.rejects(grocery.saveProduct(catalog({ name: 'Bad store', grouping: { subcategory: { name: 'New child', parentCategory: { name: 'Rollback parent' } } }, savedStore: { id: 999 } })), /no longer exists/);
     await assert.rejects(grocery.saveProduct(catalog({ name: 'Bad code owner', grouping: { subcategory: { name: 'New child', parentCategory: { name: 'Rollback parent' } } }, code: { format: 'qr', value: 'Inline\0QR' } })), /belongs to another/);
+    for (const name of ['', '  ', 'Bad\0name']) {
+      const grouping = { subcategory: { name, parentCategory: { name: 'Rollback parent' } } };
+      await assert.rejects(grocery.saveProduct(catalog({ name: 'Bad inline name', brand: { name: 'Rollback brand' }, grouping })), /blank|NUL/);
+      await assert.rejects(grocery.recordPurchase(input({ product: { name: 'Bad inline name', brand: { name: 'Rollback brand' }, grouping }, store: { id: 1 } })), /blank|NUL/);
+    }
     assert.deepEqual(await storedState(f.db), baseline);
     await f.db.execAsync("CREATE TRIGGER history_failure AFTER INSERT ON price_history BEGIN UPDATE purchases SET unit_price = 99; SELECT RAISE(ABORT, 'history failure'); END");
     const grouped = { name: 'New product', brand: { name: 'New brand' }, grouping: { subcategory: { name: 'New child', parentCategory: { name: 'New parent' } } } };
@@ -450,7 +455,7 @@ test('one grouping is required at the boundary and SQLite independently preserve
     await grocery.recordPurchase(input({ product: { name: 'Direct', grouping: { category: { id: 1 } } }, store: { id: 1 }, month: '2026-09', quantity: '1', unitPrice: '2.000' }));
     await grocery.recordPurchase(input({ product: { name: 'Child', grouping: { subcategory: { id: 1 } } }, store: { id: 1 }, month: '2026-09', quantity: '1', unitPrice: '1.500' }));
     const baseline = await storedState(f.db);
-    for (const grouping of [{}, { category: { id: 1 }, subcategory: { id: 1 } }, { subcategory: { id: 1, name: 'Mixed' } }, { subcategory: { id: 1, parentCategory: { id: 1 } } }, { subcategory: { name: 'Missing parent' } }, { subcategory: { id: 999 } }]) {
+    for (const grouping of [{}, { category: null }, { category: { id: 1 }, subcategory: { id: 1 } }, { subcategory: { id: 1, name: 'Mixed' } }, { subcategory: { id: 1, parentCategory: { id: 1 } } }, { subcategory: { name: 'Missing parent' } }, { subcategory: { id: 999 } }]) {
       await assert.rejects(grocery.saveProduct(catalog({ name: 'Invalid', grouping: grouping as unknown as Grouping })));
       await assert.rejects(grocery.recordPurchase(input({ product: { name: 'Invalid', brand: { name: 'Rollback brand' }, grouping: grouping as unknown as Grouping }, store: { id: 1 } })));
       assert.deepEqual(await storedState(f.db), baseline);

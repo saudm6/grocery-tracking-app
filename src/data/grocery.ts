@@ -172,7 +172,10 @@ async function writeSubcategory(tx: Executor, input: SubcategoryChange): Promise
 }
 async function resolveGrouping(tx: Executor, input: Grouping): Promise<{ categoryId: number | null; subcategoryId: number | null }> {
   if (!input || (input.category !== undefined) === (input.subcategory !== undefined)) throw new Error('Choose exactly one category or subcategory.');
-  if (input.category !== undefined) return { categoryId: await reference(tx, 'categories', input.category), subcategoryId: null };
+  if (input.category !== undefined) {
+    if (!input.category || typeof input.category !== 'object') throw new Error('Choose a valid category.');
+    return { categoryId: await reference(tx, 'categories', input.category), subcategoryId: null };
+  }
   const child = input.subcategory;
   if (!child || typeof child !== 'object') throw new Error('Choose a valid subcategory.');
   let subcategoryId: number;
