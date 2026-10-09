@@ -12,7 +12,7 @@ Build an Expo app for recording groceries bought, the store, quantity, and price
 | --- | --- |
 | Home | Analytics only: selected-month total, previous-month comparison, spending by category, and spending by store. Values refresh after a purchase is added, edited, or removed. |
 | Total Spending | Choose a year and month. See that month's total and every purchase entry, including repeat purchases of one product. The top-right **Add** action opens the purchase form. Each entry shows product, quantity, unit price, line total, and store; open an entry to correct or delete it. |
-| Products | Search, view, add, and edit catalog products. Add with a scan or by typing a code; products without a code can also be added manually. A product can be saved without recording spending. |
+| Products | Search, view, add, and edit catalog products, including their saved price and store. Add with a scan or by typing a code; products without a code can also be added manually. A product can be saved without recording spending. |
 | Brands | Dedicated list and add/rename page. |
 | Categories | Dedicated list and add/rename page. |
 | Stores | A reusable store list in the local database. Choose or create a store from the purchase form; the Catalog area also provides a simple list to fix store names. |
@@ -21,8 +21,8 @@ The initial bottom tabs are **Home**, **Total Spending**, and **Catalog**. Catal
 
 ## Two ways to add a product
 
-1. **Catalog only:** On Products, scan or type a code, enter a product name, and choose or create its brand and category. An unknown scan shows these manual fields on the same scanning page. Saving puts the product in the catalog for future scans. It does not change spending. From the saved product, **Record purchase** can open the monthly purchase form if the user also bought it.
-2. **While recording spending:** On Total Spending, choose a month and tap Add. Scan a code or search/select a product manually. A known code fills in the product identity, brand, and category. An unknown code, including an unknown QR code, stays visible while the scanning page shows manual fields for product name, brand, and category. The user chooses or creates a store, enters a whole-item quantity and the price paid per unit, then saves. One save creates any new catalog records and the purchase together, then returns to that month's list.
+1. **Catalog only:** On Products, scan or type a code, enter a product name, choose or create its brand and category, and optionally save its current price and store. An unknown scan shows these manual fields on the same scanning page. Saving puts the product in the catalog for future scans. It does not change spending. From the saved product, **Record purchase** can open the monthly purchase form if the user also bought it.
+2. **While recording spending:** On Total Spending, choose a month and tap Add. Scan a code or search/select a product manually. A known code fills in the product identity, brand, category, saved price, and saved store; the user confirms or changes the price and store for this purchase. An unknown code, including an unknown QR code, stays visible while the scanning page shows manual fields for product name, brand, category, store, and price. The user enters a whole-item quantity, then saves. One save creates any new catalog records, saves the new product's price and store, and records the purchase with its own price and store before returning to that month's list.
 
 For either flow, a denied camera permission or an unreadable label leaves manual code entry and product search available. A scan is handled once per form opening so a camera callback cannot add duplicate purchases. Repeated purchases of the same product remain separate entries, because store and price can differ.
 
@@ -35,11 +35,13 @@ The app uses Expo SQLite as the single local database. Expo Router provides the 
 | Brand | ID, unique name |
 | Category | ID, unique name |
 | Store | ID, unique name |
-| Product | ID, name, optional brand ID, optional category ID, archived status |
+| Product | ID, name, optional brand ID, optional category ID, optional saved price in baisa, optional saved store ID, archived status |
 | Product code | Product ID, code kind, original code, lookup key; each kind/key pair identifies one product, and one product may have more than one code |
 | Purchase entry | ID, product ID, store ID, chosen year-month, category ID at purchase time, quantity, unit price in baisa, creation time |
 
-The purchase entry owns the price: editing a catalog product never rewrites what was paid. Its category ID is recorded at purchase time so changing a product's category later does not move old spending between categories. The purchase correction form can fix a mistaken category on that entry. Product and store names remain linked to catalog records so a spelling correction appears everywhere, including older entries. Monthly totals are calculated from purchase entries, never stored in a second totals table. A product, brand, category, or store used in purchases cannot be deleted in a way that erases history.
+The product's saved price and store prefill future purchases. Each purchase keeps its own confirmed price and actual store. Editing a product's saved price or store never rewrites an older purchase or its monthly total; recording a purchase at a different price does not silently change the product's saved price. For example, buying an item at 2.000 OMR records 2.000 OMR in that month. Changing the product's saved price to 2.500 OMR six months later prefills 2.500 OMR for the next purchase while the earlier entry remains 2.000 OMR.
+
+The purchase entry also records its category ID at purchase time so changing a product's category later does not move old spending between categories. The purchase correction form can fix a mistaken category on that entry. Product and store names remain linked to catalog records so a spelling correction appears everywhere, including older entries. Monthly totals are calculated from purchase entries, never stored in a second totals table. A product, brand, category, or store used in purchases cannot be deleted in a way that erases history.
 
 Quantity is a positive whole number of items and price is the amount for one item; line total is quantity × unit price. Prices are stored as integer baisa to avoid floating-point totals.
 
@@ -68,13 +70,10 @@ Two shapes were compared. A pure catalog model stores only links in purchases; i
 - An unknown QR code opens manual product details on the same scanning page.
 - The first version uses OMR only, with no currency selector or conversion.
 - Quantity is a whole-item count; weights and volumes are outside the first version.
-
-## Decisions to confirm before app code
-
-1. When adding a product in the catalog, should price and store be saved as suggestions for later purchases, or is the **Record purchase** action enough? This draft keeps price and store on purchases only.
+- Products can hold a saved price and store for new purchases; each purchase preserves its actual price and store when those product defaults change.
 
 ## First implementation slice after approval
 
-Set up the Expo project, SQLite schema, and code lookup/record-purchase boundary. Verify that an unknown scan plus inline brand/category/store creates one complete purchase, a repeated scan cannot create a duplicate unintentionally, and monthly totals use the saved prices. Then build the screens around those operations.
+Set up the Expo project, SQLite schema, and code lookup/record-purchase boundary. Verify that an unknown scan plus inline brand/category/store creates one complete purchase, a repeated scan cannot create a duplicate unintentionally, and changing a product's saved price does not change older monthly totals. Then build the screens around those operations.
 
 No cloud account, cross-device sync, receipt import, or online product search is included in this first design. A local-only database can be lost if the app is uninstalled or the device is lost; export or backup should be designed before relying on it as the only long-term record.
