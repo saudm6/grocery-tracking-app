@@ -460,6 +460,34 @@ test('chronological predecessor controls first-price exclusion and baseline with
   } finally { f.cleanup(); }
 });
 
+test('catalog metadata edits preserve purchase snapshots and existing subcategory membership unless explicitly changed', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.recordPurchase(input());
+    await f.db.execAsync("INSERT INTO subcategories(id, category_id, name, name_key) VALUES (1, 1, 'Milk', 'milk'); UPDATE products SET category_id = NULL, subcategory_id = 1 WHERE id = 1;");
+    const purchases = await f.db.getAllAsync('SELECT * FROM purchases');
+    const history = await f.db.getAllAsync('SELECT * FROM price_history');
+    await grocery.saveProduct(catalog({ id: 1, name: 'Corrected milk', brand: { id: 1 }, grouping: { subcategoryId: 1 }, savedStore: { id: 1 } }));
+    assert.equal((await grocery.getProductDetails(1)).subcategoryId, 1);
+    await grocery.saveProduct(catalog({ id: 1, name: 'Corrected milk', brand: { name: 'New brand' }, grouping: { category: { name: 'Other category' } }, savedStore: null }));
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM purchases'), purchases);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM price_history'), history);
+    assert.deepEqual((await grocery.getMonth('2026-10')).purchases[0], { id: 1, productId: 1, product: 'Corrected milk', brand: 'Mazoon', category: 'Dairy', subcategory: null, store: 'Local store', month: '2026-10', purchaseDate: null, quantity: 3, unitPrice: 1, lineTotal: 3 });
+    const details = await grocery.getProductDetails(1);
+    assert.equal(details.brand, 'New brand');
+    assert.equal(details.category, 'Other category');
+    assert.equal(details.subcategoryId, null);
+    assert.equal(details.savedPrice, 1);
+    assert.equal(details.savedStoreId, null);
+    const unpriced = await grocery.saveProduct(catalog({ name: 'Store only', grouping: { category: { id: 1 } }, savedStore: { id: 1 } }));
+    assert.equal((await grocery.getProductDetails(unpriced)).savedStoreId, 1);
+    assert.equal((await grocery.getProductDetails(unpriced)).savedPrice, null);
+    assert.equal((await grocery.getProductDetails(unpriced)).history.length, 0);
+    assert.equal((await grocery.getMonth('2026-10')).total, 3);
+  } finally { f.cleanup(); }
+});
+
 test('code ownership is canonical, separate for QR, exact for Unicode/NUL, and rolls back complete failed catalog saves', async () => {
   const f = await fixture();
   try {
