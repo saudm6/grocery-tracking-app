@@ -21,7 +21,7 @@ concurrency:
 jobs:
   native-ios:
     runs-on: macos-26-intel
-    timeout-minutes: 55
+    timeout-minutes: 180
     env:
       EXPECTED_SHA: ${{ inputs.source_sha || github.event.pull_request.head.sha || github.sha }}
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
@@ -45,8 +45,22 @@ jobs:
           npm test
           node tests/native/assert-ios-db.mjs --self-test
           bash scripts/verify-ios-simulator.sh --self-test
+      - name: Prove connectivity before compiler cache restore
+        id: cache-network
+        run: bash scripts/verify-ios-simulator.sh --cache-preflight
+      - name: Restore compiler results only
+        id: compiler-cache
+        if: steps.cache-network.outputs.cache_network_ready == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/grocery-ios-derived/CompilationCache.noindex
+          key: ios-cas-v1-${{ steps.cache-network.outputs.image_version }}-xcode26.6-ios26.5-intel-release-${{ hashFiles('package-lock.json', 'app.json') }}-${{ env.EXPECTED_SHA }}
+          restore-keys: ios-cas-v1-${{ steps.cache-network.outputs.image_version }}-xcode26.6-ios26.5-intel-release-${{ hashFiles('package-lock.json', 'app.json') }}-
       - name: Build and exercise the native Release app
         id: native
+        env:
+          COMPILER_CACHE_HIT: ${{ steps.compiler-cache.outputs.cache-hit }}
+          COMPILER_CACHE_MATCHED_KEY: ${{ steps.compiler-cache.outputs.cache-matched-key }}
         run: bash scripts/verify-ios-simulator.sh
       - name: Upload native evidence
         if: always() && steps.native.outputs.safe_to_upload == 'true'
@@ -56,3 +70,9 @@ jobs:
           path: ${{ runner.temp }}/grocery-ios-evidence/
           if-no-files-found: warn
           retention-days: 14
+      - name: Save bounded compiler results after proven restoration
+        if: always() && steps.native.outputs.safe_to_upload == 'true' && steps.native.outputs.compiler_cache_save_ok == 'true' && steps.compiler-cache.outputs.cache-hit != 'true' && steps.compiler-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/grocery-ios-derived/CompilationCache.noindex
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
