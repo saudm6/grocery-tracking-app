@@ -71,12 +71,29 @@ bounded_run() {
   local seconds="$1"
   shift
   BOUNDED_CLEANUP_FAILED_FILE="$evidence/command-cleanup-failed" python3 - "$seconds" "$@" <<'PY'
-import os, pathlib, signal, subprocess, sys, time
+import json, os, pathlib, signal, subprocess, sys, time
 p = None
 received_signal = 0
+primary = {'reason': 'spawn', 'exitCode': 1}
+def record(event, **details):
+    row = {'event': event, 'command': pathlib.Path(sys.argv[2]).name,
+           'ownedGroup': p.pid if p is not None else None, **details}
+    encoded = json.dumps(row)
+    print('[bounded] ' + encoded, file=sys.stderr, flush=True)
+    marker = os.getenv('BOUNDED_CLEANUP_FAILED_FILE')
+    if marker and event == 'cleanup-failed':
+        with pathlib.Path(marker).open('a') as stream: stream.write(encoded + '\n')
+def group_members():
+    if os.name != 'posix': return []
+    try:
+        rows = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,stat='], capture_output=True,
+                              text=True, timeout=2, check=True).stdout.splitlines()
+        return [row.split() for row in rows if len(row.split()) == 4 and row.split()[2] == str(p.pid)][:40]
+    except Exception as error: return {'diagnosticError': type(error).__name__}
 def cancel(signum, frame):
-    global received_signal
+    global received_signal, primary
     received_signal = signum
+    primary = {'reason': 'signal', 'signal': signum, 'exitCode': 128 + signum}
     if p is not None: raise SystemExit(128 + signum)
 for signum in (signal.SIGINT, signal.SIGTERM): signal.signal(signum, cancel)
 try:
@@ -89,16 +106,20 @@ try:
         if remaining <= 0: raise subprocess.TimeoutExpired(p.args, budget)
         try:
             result = p.wait(timeout=min(45, remaining))
+            primary = {'reason': 'child-exit', 'childStatus': result, 'exitCode': result if result >= 0 else 128 - result}
             sys.exit(result if result >= 0 else 128 - result)
         except subprocess.TimeoutExpired:
             if time.monotonic() - started >= budget: raise
             print(f'[progress] command={sys.argv[2]} elapsed={int(time.monotonic()-started)}s budget={budget}s', file=sys.stderr, flush=True)
 except subprocess.TimeoutExpired:
+    primary = {'reason': 'deadline', 'exitCode': 124}
     sys.exit(124)
 except KeyboardInterrupt:
+    primary = {'reason': 'interrupt', 'exitCode': 130}
     sys.exit(130)
 finally:
     for signum in (signal.SIGINT, signal.SIGTERM): signal.signal(signum, signal.SIG_IGN)
+    record('primary-exit', **primary)
     if p is not None:
         try:
             def stop_group(signum):
@@ -118,11 +139,17 @@ finally:
                     except ProcessLookupError: break
                     if time.monotonic() >= deadline: raise RuntimeError('Owned command group did not finish cleanup')
                     time.sleep(0.05)
-        except BaseException:
-            marker = os.getenv('BOUNDED_CLEANUP_FAILED_FILE')
-            if marker: pathlib.Path(marker).touch()
+            record('cleanup-complete', childStatus=p.returncode)
+        except BaseException as error:
+            record('cleanup-failed', errorType=type(error).__name__, error=str(error)[:2048],
+                   primary=primary, members=group_members())
             raise
 PY
+}
+
+failure_tail() {
+  printf '[failure-tail] %s (at most 80 lines, 2048 characters per line)\n' "$1"
+  tail -n 80 "$2" | awk '{ print substr($0, 1, 2048); fflush(); }'
 }
 
 run_stage() {
@@ -135,7 +162,7 @@ run_stage() {
   printf '\n' >> "$evidence/commands.log"
   if bounded_run "$seconds" "$@" 2>&1 | tee "$evidence/$name.log" | awk '/^\[progress\]|^CompileC |^Swift|^Ld |^\*\*| error:| warning:/ { print; fflush(); }'; then
     result=0
-  else result=$?; fi
+  else result=$?; failure_tail "$name" "$evidence/$name.log"; fi
   printf '%s stage=%s state=end exit=%s\n' "$(date -u '+%FT%TZ')" "$name" "$result" | tee -a "$evidence/stages.log"
   return "$result"
 }
@@ -191,7 +218,7 @@ if [[ "${1:-}" == --self-test ]]; then
   [[ "$(wc -l < "$test_dir/probe-events" | tr -d ' ')" == 1 ]]
   evidence="$test_dir"
   run_stage fixture-success 5 "$(python3 -c 'import sys; print(sys.executable)')" -c 'print("full diagnostic retained")'
-  [[ "$(cat "$evidence/fixture-success.log")" == 'full diagnostic retained' ]]
+  rg -q '^full diagnostic retained' "$evidence/fixture-success.log"
   if run_stage fixture-failure 5 "$(python3 -c 'import sys; print(sys.executable)')" -c 'raise SystemExit(9)'; then
     exit 1
   else [[ "$?" == 9 ]]; fi
@@ -202,6 +229,12 @@ if [[ "${1:-}" == --self-test ]]; then
   fi
   [[ "$active_stage" == fixture-deadline ]]
   [[ "$(tail -n 1 "$evidence/stages.log")" == *'stage=fixture-deadline state=end exit=124' ]]
+  if run_stage fixture-traceback 5 "$(python3 -c 'import sys; print(sys.executable)')" -c 'raise RuntimeError("fixture diagnostic visible")' > "$test_dir/traceback-console.txt"; then
+    exit 1
+  else [[ "$?" == 1 ]]; fi
+  rg -q '^RuntimeError: fixture diagnostic visible' "$test_dir/traceback-console.txt"
+  rg -q '"reason": "child-exit".*"exitCode": 1' "$test_dir/traceback-console.txt"
+  [[ ! -f "$evidence/command-cleanup-failed" ]]
   python3 - "${BASH_SOURCE[0]}" "$test_dir" <<'PY'
 import os, pathlib, signal, subprocess, sys, time
 source = pathlib.Path(sys.argv[1]).read_text()
@@ -258,6 +291,41 @@ for reason, signum, expected in [('SIGINT', signal.SIGINT, 130), ('SIGTERM', sig
                 except ProcessLookupError: pass
             elif child.poll() is None: child.kill()
             child.wait()
+cleanup_child = None
+class CleanupFailureChild(original_popen):
+    waits = 0
+    def wait(self, *args, **kwargs):
+        result = super().wait(*args, **kwargs)
+        self.waits += 1
+        if self.waits == 2: raise RuntimeError('fixture owned cleanup exception')
+        return result
+def failing_cleanup(*args, **kwargs):
+    global cleanup_child
+    if args[0][0] == sys.executable:
+        cleanup_child = CleanupFailureChild(*args, **kwargs)
+        return cleanup_child
+    return original_popen(*args, **kwargs)
+marker = directory / 'fixture-cleanup-failed'
+os.environ['BOUNDED_CLEANUP_FAILED_FILE'] = str(marker)
+subprocess.Popen = failing_cleanup
+sys.argv = ['bounded', '5', sys.executable, '-c', 'raise SystemExit(0)']
+try:
+    try: exec(compile(body, 'bounded_run', 'exec'), {})
+    except RuntimeError as error: assert str(error) == 'fixture owned cleanup exception'
+    else: raise AssertionError('Fixture cleanup exception must propagate')
+    import json
+    details = json.loads(marker.read_text())
+    assert details['event'] == 'cleanup-failed' and details['primary']['exitCode'] == 0
+    assert details['errorType'] == 'RuntimeError' and details['ownedGroup'] == cleanup_child.pid
+    assert cleanup_child.poll() is not None, 'Diagnostic fixture must reap the owned child'
+    print('Cleanup exception: primary exit 0 retained, structured denial reason recorded, owned child reaped')
+finally:
+    subprocess.Popen, sys.argv = original_popen, original_argv[:]
+    os.environ.pop('BOUNDED_CLEANUP_FAILED_FILE')
+    for s, handler in original_handlers.items(): signal.signal(s, handler)
+    if cleanup_child is not None:
+        if cleanup_child.poll() is None: cleanup_child.kill()
+        original_popen.wait(cleanup_child)
 PY
   [[ ! -f "$evidence/command-cleanup-failed" ]]
   printf 'Helper self-test passed: restore/probe failure paths, timed recovery/live loopback, early diagnostics, retained stage logs/exit status, real-child signal and deadline cleanup. No host interface commands ran.\n'
@@ -292,7 +360,8 @@ if [[ "${1:-}" == --cache-preflight ]]; then
 fi
 
 cleanup() {
-  local result=$? cache_kib network_proven=0
+  local result=$? cache_kib network_proven=0 primary_result
+  primary_result="$result"
   trap - EXIT INT TERM
   if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi
   if prove_restoration "$state" "$offline_started" 155; then
@@ -303,8 +372,8 @@ cleanup() {
   fi
   if [[ -n "$loopback_pid" ]]; then kill "$loopback_pid" 2>/dev/null || true; fi
   if [[ -n "$udid" ]]; then
-    bounded_run 30 xcrun simctl io "$udid" screenshot "$evidence/final-screen.png" 2>/dev/null || true
-    bounded_run 60 xcrun simctl shutdown "$udid" 2>/dev/null || true
+    bounded_run 30 xcrun simctl io "$udid" screenshot "$evidence/final-screen.png" > "$evidence/cleanup-screenshot.log" 2>&1 || failure_tail cleanup-screenshot "$evidence/cleanup-screenshot.log"
+    bounded_run 60 xcrun simctl shutdown "$udid" > "$evidence/cleanup-shutdown.log" 2>&1 || failure_tail cleanup-shutdown "$evidence/cleanup-shutdown.log"
   fi
   if [[ "$network_proven" == 1 && ! -f "$evidence/command-cleanup-failed" ]]; then
     printf 'safe_to_upload=true\n' >> "$GITHUB_OUTPUT"
@@ -316,21 +385,27 @@ cleanup() {
     fi
   else result=1; fi
   if [[ "$result" != 0 ]]; then passed=false; fi
-  EXPECTED_SHA="$EXPECTED_SHA" EVIDENCE="$evidence" PASSED="$passed" RESULT="$result" UDID="$udid" ACTIVE_STAGE="$active_stage" python3 - <<'PY'
+  EXPECTED_SHA="$EXPECTED_SHA" EVIDENCE="$evidence" PASSED="$passed" RESULT="$result" PRIMARY_RESULT="$primary_result" OFFLINE_STARTED="$offline_started" UDID="$udid" ACTIVE_STAGE="$active_stage" python3 - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ['EVIDENCE'])
 receipt = {'sourceSHA': os.environ['EXPECTED_SHA'], 'workflowSHA': os.getenv('GITHUB_WORKFLOW_SHA'),
            'runID': os.getenv('GITHUB_RUN_ID'), 'simulatorUDID': os.environ['UDID'],
            'nativeOfflineSmokePassed': os.environ['PASSED'] == 'true', 'exitCode': int(os.environ['RESULT']),
+           'primaryExitCode': int(os.environ['PRIMARY_RESULT']),
            'lastStage': os.environ['ACTIVE_STAGE'],
            'bundleIdentifier': 'com.saudm6.grocerytracker', 'configuration': 'Release',
            'networkRestored': (p/'network/restored').exists(),
            'networkRestorationProven': (p/'network/restoration-proven').exists(),
            'ownedCommandCleanupFailed': (p/'command-cleanup-failed').exists(),
+           'ownedCommandCleanupDetails': (p/'command-cleanup-failed').read_text()[-4096:] if (p/'command-cleanup-failed').exists() else None,
+           'safeToUpload': (p/'network/restoration-proven').exists() and not (p/'command-cleanup-failed').exists(),
+           'networkWithdrawn': os.getenv('OFFLINE_STARTED') == '1',
+           'networkProbeTail': (p/'network/probes.log').read_text().splitlines()[-8:] if (p/'network/probes.log').exists() else [],
            'timedGuardFired': (p/'network/guard-fired').exists(),
            'limits': ['Simulator, not physical iPhone', 'Manual-purchase slice only; final issue 18 audit follows features',
                       'No physical camera or spoken screen-reader proof']}
 (p/'receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
+print('[cleanup-receipt] ' + json.dumps(receipt), flush=True)
 PY
   exit "$result"
 }
@@ -376,6 +451,8 @@ cp.execFileSync('git', ['restore', '--source', process.argv[2], '--', 'package.j
 assert.equal(cp.execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {encoding:'utf8'}), '', 'Prebuild changed tracked source or lockfile');
 JS
 run_stage pods 600 /bin/bash -c 'cd ios && pod install'
+cp ios/Podfile.lock "$evidence/Podfile.lock"
+shasum -a 256 "$evidence/Podfile.lock" > "$evidence/native-lockfile-checksum.txt"
 [[ -z "$(git status --porcelain --untracked-files=no)" ]]
 
 workspace="$(find ios -maxdepth 1 -type d -name '*.xcworkspace')"
@@ -412,7 +489,7 @@ PY
 )"
 [[ ! -e "$app" ]]
 date '+%s' > "$evidence/build-start-epoch.txt"
-run_stage build 7200 xcodebuild "${build_args[@]}" -resultBundlePath "$evidence/build.xcresult" -jobs 2 build
+run_stage build 10800 xcodebuild "${build_args[@]}" -resultBundlePath "$evidence/build.xcresult" -jobs 2 build
 [[ -s "$app/main.jsbundle" ]]
 python3 - "$app/main.jsbundle" "$evidence/build-start-epoch.txt" <<'PY' > "$evidence/fresh-bundle.json"
 import json, os, sys
