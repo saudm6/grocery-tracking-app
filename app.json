@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "Grocery tracker",
+    "slug": "grocery-tracking-app",
+    "scheme": "grocery-tracker",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": { "supportsTablet": true },
+    "android": { "softwareKeyboardLayoutMode": "resize", "package": "com.saudm6.grocerytracker" },
+    "plugins": ["expo-router", "expo-sqlite"]
+  }
+}
