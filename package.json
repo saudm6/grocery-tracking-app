@@ -1,0 +1,38 @@
+{
+  "name": "grocery-tracking-app",
+  "version": "1.0.0",
+  "main": "expo-router/entry",
+  "dependencies": {
+    "@expo/ui": "~57.0.22",
+    "expo": "~57.0.27",
+    "expo-constants": "~57.0.21",
+    "expo-linking": "~57.0.12",
+    "expo-router": "~57.0.25",
+    "expo-sqlite": "~57.0.4",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-reanimated": "4.5.1",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
+    "react-native-worklets": "0.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/react": "~19.2.2",
+    "eslint": "^9.39.5",
+    "eslint-config-expo": "~57.0.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "typecheck": "tsc --noEmit",
+    "lint": "expo lint",
+    "test": "tsc -p tsconfig.test.json && node --test .test-build/grocery.test.js",
+    "bundle": "expo export --platform android --output-dir dist/android --no-bytecode && expo export --platform ios --output-dir dist/ios --no-bytecode"
+  },
+  "private": true
+}
