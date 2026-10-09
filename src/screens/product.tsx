@@ -27,7 +27,7 @@ function ArchiveAction({ product, disabled, onCommitted }: { product: ProductDet
 }
 
 export default function Product() {
-  const params = useLocalSearchParams<{ id: string }>();
+  const params = useLocalSearchParams<{ id: string; month?: string }>();
   const productId = Number(params.id);
   const grocery = useGrocery();
   const [product, setProduct] = useState<ProductDetails | null>(null);
@@ -48,11 +48,15 @@ export default function Product() {
       <Text selectable accessibilityRole="header" style={{ fontSize: 24 }}>{product.name}{product.archived ? ' · Archived' : ''}</Text>
       <Text selectable>Brand · {product.brand ?? 'No brand'}</Text>
       <Text selectable>Category · {product.category}{product.subcategory ? ` / ${product.subcategory}` : ''}</Text>
+      {product.subcategoryId !== null ? <Action label={`Open subcategory ${product.category} / ${product.subcategory}`} disabled={!!error} onPress={() => router.push({ pathname: '/subcategory/[id]', params: { id: product.subcategoryId! } })} /> : null}
       <Text selectable>Saved price · {product.savedPrice === null ? 'Not set' : `${formatOMR(product.savedPrice)} OMR`}</Text>
       <Text selectable>Saved store · {product.savedStore ?? 'Not set'}</Text>
       <Text selectable>Price first set · {product.priceFirstSet ? new Date(product.priceFirstSet).toLocaleString() : 'Not set'}</Text>
       <Text selectable>Last saved price changed · {product.lastSavedPriceChanged ? new Date(product.lastSavedPriceChanged).toLocaleString() : 'Not set'}</Text>
-      {product.archived ? <Text>Reactivate this product to edit it or record a new purchase. Its codes and history remain owned by this product.</Text> : <Action label="Edit product" disabled={!!error} onPress={() => router.push({ pathname: '/product-edit', params: { id: product.id } })} />}
+      {product.archived ? <Text>Reactivate this product to edit it or record a new purchase. Its codes and history remain owned by this product.</Text> : <>
+        <Action label="Record purchase" disabled={!!error} onPress={() => router.push({ pathname: '/purchase', params: { productId: product.id, ...(params.month === undefined ? {} : { month: params.month }) } })} />
+        <Action label="Edit product" disabled={!!error} onPress={() => router.push({ pathname: '/product-edit', params: { id: product.id, ...(params.month === undefined ? {} : { month: params.month }) } })} />
+      </>}
       <ArchiveAction key={`${product.id}:${product.archived}`} product={product} disabled={!!error} onCommitted={(archived) => { setProduct({ ...product, archived }); setNotice(archived ? 'Product archived. Spending, codes, and history are kept.' : 'Product reactivated with its original identity.'); refresh(); }} />
       <Text accessibilityRole="header" style={{ fontSize: 22 }}>Product codes</Text>
       {product.codes.length === 0 ? <Text>No codes. You can add a typed code when editing.</Text> : product.codes.map((code) => <View key={code.id} style={{ gap: 6 }}>

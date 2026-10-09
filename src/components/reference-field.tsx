@@ -4,7 +4,7 @@ import type { Reference, ReferenceRow } from '../data/grocery';
 import { Action, Field } from './form';
 
 export function ReferenceField({ label, kind, value, rows, onChange, editable }: {
-  label: string; kind: 'brand' | 'store' | 'category'; value: Reference; rows: ReferenceRow[];
+  label: string; kind: 'brand' | 'store' | 'category' | 'subcategory'; value: Reference; rows: ReferenceRow[];
   onChange: (value: Reference) => void; editable: boolean;
 }) {
   const [choosing, setChoosing] = useState(false);
