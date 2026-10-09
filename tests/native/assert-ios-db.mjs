@@ -10,7 +10,7 @@ function verify(path, month, date) {
   assert.ok(existsSync(path), 'The installed app must have created grocery.db');
   const db = new DatabaseSync(path, { readOnly: true });
   try {
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 1);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
     assert.deepEqual(db.prepare('PRAGMA integrity_check').all().map((row) => ({ ...row })), [{ integrity_check: 'ok' }]);
     assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0);
     const rows = db.prepare(`SELECT p.id, pr.name AS product, b.name AS brand, c.name AS category,
@@ -48,7 +48,7 @@ function verify(path, month, date) {
     assert.equal(history.effective_date, date);
     assert.equal(history.included, 1);
     assert.ok(!Number.isNaN(Date.parse(history.recorded_at)));
-    return { schemaVersion: 1, integrity: 'ok', foreignKeyViolations: 0, purchase: row, history };
+    return { schemaVersion: 2, integrity: 'ok', foreignKeyViolations: 0, purchase: row, history };
   } finally {
     db.close();
   }
@@ -91,7 +91,7 @@ async function selfTest() {
     verify(path, '2026-10', '2026-10-09');
     connection.exec('UPDATE purchases SET unit_price = 2');
     assert.throws(() => verify(path, '2026-10', '2026-10-09'));
-    connection.exec('UPDATE purchases SET unit_price = 1; PRAGMA user_version = 2');
+    connection.exec('UPDATE purchases SET unit_price = 1; PRAGMA user_version = 3');
     assert.throws(() => verify(path, '2026-10', '2026-10-09'));
     assert.throws(() => verify(join(directory, 'missing.db'), '2026-10', '2026-10-09'));
     process.stdout.write('SQLite proof self-test passed: real writer accepted; wrong price/schema/missing file rejected.\n');
