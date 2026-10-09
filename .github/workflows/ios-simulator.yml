@@ -2,8 +2,44 @@ name: iOS Simulator
 
 on:
   pull_request:
+    paths:
+      - package.json
+      - package-lock.json
+      - app.json
+      - app.config.*
+      - babel.config.*
+      - metro.config.*
+      - react-native.config.*
+      - assets/icon.png
+      - plugins/**
+      - modules/**
+      - ios/**
+      - android/**
+      - src/data/schema.ts
+      - src/data/provider.tsx
+      - .github/workflows/ios-simulator.yml
+      - scripts/verify-ios-simulator.sh
+      - tests/native/**
   push:
     branches: [main]
+    paths:
+      - package.json
+      - package-lock.json
+      - app.json
+      - app.config.*
+      - babel.config.*
+      - metro.config.*
+      - react-native.config.*
+      - assets/icon.png
+      - plugins/**
+      - modules/**
+      - ios/**
+      - android/**
+      - src/data/schema.ts
+      - src/data/provider.tsx
+      - .github/workflows/ios-simulator.yml
+      - scripts/verify-ios-simulator.sh
+      - tests/native/**
   workflow_dispatch:
     inputs:
       source_sha:

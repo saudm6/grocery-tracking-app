@@ -70,30 +70,58 @@ prove_restoration() {
 bounded_run() {
   local seconds="$1"
   shift
-  python3 - "$seconds" "$@" <<'PY'
-import os, signal, subprocess, sys, time
-p = subprocess.Popen(sys.argv[2:], start_new_session=True)
-started = time.monotonic()
-budget = int(sys.argv[1])
+  BOUNDED_CLEANUP_FAILED_FILE="$evidence/command-cleanup-failed" python3 - "$seconds" "$@" <<'PY'
+import os, pathlib, signal, subprocess, sys, time
+p = None
+received_signal = 0
+def cancel(signum, frame):
+    global received_signal
+    received_signal = signum
+    if p is not None: raise SystemExit(128 + signum)
+for signum in (signal.SIGINT, signal.SIGTERM): signal.signal(signum, cancel)
 try:
+    p = subprocess.Popen(sys.argv[2:], start_new_session=True)
+    if received_signal: raise SystemExit(128 + received_signal)
+    started = time.monotonic()
+    budget = int(sys.argv[1])
     while True:
         remaining = budget - (time.monotonic() - started)
         if remaining <= 0: raise subprocess.TimeoutExpired(p.args, budget)
         try:
-            sys.exit(p.wait(timeout=min(45, remaining)))
+            result = p.wait(timeout=min(45, remaining))
+            sys.exit(result if result >= 0 else 128 - result)
         except subprocess.TimeoutExpired:
             if time.monotonic() - started >= budget: raise
             print(f'[progress] command={sys.argv[2]} elapsed={int(time.monotonic()-started)}s budget={budget}s', file=sys.stderr, flush=True)
 except subprocess.TimeoutExpired:
-    if os.name == 'posix': os.killpg(p.pid, signal.SIGTERM)
-    else: p.terminate()
-    try:
-        p.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        if os.name == 'posix': os.killpg(p.pid, signal.SIGKILL)
-        else: p.kill()
-        p.wait()
     sys.exit(124)
+except KeyboardInterrupt:
+    sys.exit(130)
+finally:
+    for signum in (signal.SIGINT, signal.SIGTERM): signal.signal(signum, signal.SIG_IGN)
+    if p is not None:
+        try:
+            def stop_group(signum):
+                try: os.killpg(p.pid, signum)
+                except ProcessLookupError: pass
+            if os.name == 'posix': stop_group(signal.SIGTERM)
+            elif p.poll() is None: p.terminate()
+            try: p.wait(timeout=1)
+            except subprocess.TimeoutExpired: pass
+            if os.name == 'posix': stop_group(signal.SIGKILL)
+            elif p.poll() is None: p.kill()
+            p.wait()
+            if os.name == 'posix':
+                deadline = time.monotonic() + 5
+                while True:
+                    try: os.killpg(p.pid, 0)
+                    except ProcessLookupError: break
+                    if time.monotonic() >= deadline: raise RuntimeError('Owned command group did not finish cleanup')
+                    time.sleep(0.05)
+        except BaseException:
+            marker = os.getenv('BOUNDED_CLEANUP_FAILED_FILE')
+            if marker: pathlib.Path(marker).touch()
+            raise
 PY
 }
 
@@ -174,7 +202,65 @@ if [[ "${1:-}" == --self-test ]]; then
   fi
   [[ "$active_stage" == fixture-deadline ]]
   [[ "$(tail -n 1 "$evidence/stages.log")" == *'stage=fixture-deadline state=end exit=124' ]]
-  printf 'Helper self-test passed: restore/probe failure paths, timed recovery/live loopback, early diagnostics, retained stage logs and exit status, process deadline. No host interface commands ran.\n'
+  python3 - "${BASH_SOURCE[0]}" "$test_dir" <<'PY'
+import os, pathlib, signal, subprocess, sys, time
+source = pathlib.Path(sys.argv[1]).read_text()
+body = source.split("python3 - \"$seconds\" \"$@\" <<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+original_popen, original_argv = subprocess.Popen, sys.argv[:]
+original_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+directory = pathlib.Path(sys.argv[2])
+program = '''import json, os, pathlib, signal, subprocess, sys, time
+ready = pathlib.Path(sys.argv[1])
+grandchild = None
+if os.name == 'posix':
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+ready.write_text(json.dumps({'child': os.getpid(), 'grandchild': grandchild.pid if grandchild else None}))
+time.sleep(30)
+'''
+for reason, signum, expected in [('SIGINT', signal.SIGINT, 130), ('SIGTERM', signal.SIGTERM, 143), ('deadline', None, 124)]:
+    children = []
+    ready = directory / f'{reason}-child.json'
+    class ObservedChild(original_popen):
+        delivered = False
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            children.append(self)
+        def wait(self, *args, **kwargs):
+            if not self.delivered:
+                self.delivered = True
+                deadline = time.monotonic() + 5
+                while not ready.exists():
+                    assert self.poll() is None, 'Fixture child must be alive before cancellation'
+                    assert time.monotonic() < deadline, 'Fixture child readiness deadline'
+                    time.sleep(0.01)
+                assert self.poll() is None
+                if signum is not None: signal.raise_signal(signum)
+            return super().wait(*args, **kwargs)
+    subprocess.Popen = ObservedChild
+    sys.argv = ['bounded', '1' if signum is None else '30', sys.executable, '-c', program, str(ready)]
+    try:
+        try: exec(compile(body, 'bounded_run', 'exec'), {})
+        except SystemExit as exit_result: assert exit_result.code == expected, (reason, exit_result.code)
+        else: raise AssertionError('Bounded child must exit')
+        assert len(children) == 1 and children[0].poll() is not None, 'Owned child must be terminated and reaped'
+        if os.name == 'posix':
+            try: os.killpg(children[0].pid, 0)
+            except ProcessLookupError: pass
+            else: raise AssertionError('Owned descendant group must be gone')
+        print(f'{reason}: exit={expected}, owned child PID={children[0].pid} terminated and waited; platform={os.name}')
+    finally:
+        subprocess.Popen, sys.argv = original_popen, original_argv[:]
+        for s, handler in original_handlers.items(): signal.signal(s, handler)
+        for child in children:
+            if os.name == 'posix':
+                try: os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+            elif child.poll() is None: child.kill()
+            child.wait()
+PY
+  [[ ! -f "$evidence/command-cleanup-failed" ]]
+  printf 'Helper self-test passed: restore/probe failure paths, timed recovery/live loopback, early diagnostics, retained stage logs/exit status, real-child signal and deadline cleanup. No host interface commands ran.\n'
   exit 0
 fi
 
@@ -210,8 +296,10 @@ cleanup() {
   trap - EXIT INT TERM
   if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi
   if prove_restoration "$state" "$offline_started" 155; then
-    printf 'safe_to_upload=true\n' >> "$GITHUB_OUTPUT"
-    if [[ -d "$compiler_cache" ]] && cache_kib="$(du -sk "$compiler_cache" | awk '{print $1}')"; then
+    if [[ ! -f "$evidence/command-cleanup-failed" ]]; then
+      printf 'safe_to_upload=true\n' >> "$GITHUB_OUTPUT"
+    else result=1; fi
+    if [[ ! -f "$evidence/command-cleanup-failed" && -d "$compiler_cache" ]] && cache_kib="$(du -sk "$compiler_cache" | awk '{print $1}')"; then
       printf 'directory=%s\nsizeKiB=%s\n' "$compiler_cache" "$cache_kib" > "$evidence/compiler-cache-size.txt"
       if [[ "$cache_kib" =~ ^[0-9]+$ && "$cache_kib" -gt 0 && "$cache_kib" -le 2097152 ]]; then
         printf 'compiler_cache_save_ok=true\n' >> "$GITHUB_OUTPUT"
@@ -237,6 +325,7 @@ receipt = {'sourceSHA': os.environ['EXPECTED_SHA'], 'workflowSHA': os.getenv('GI
            'bundleIdentifier': 'com.saudm6.grocerytracker', 'configuration': 'Release',
            'networkRestored': (p/'network/restored').exists(),
            'networkRestorationProven': (p/'network/restoration-proven').exists(),
+           'ownedCommandCleanupFailed': (p/'command-cleanup-failed').exists(),
            'timedGuardFired': (p/'network/guard-fired').exists(),
            'limits': ['Simulator, not physical iPhone', 'Manual-purchase slice only; final issue 18 audit follows features',
                       'No physical camera or spoken screen-reader proof']}
