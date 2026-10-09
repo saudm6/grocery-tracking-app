@@ -292,19 +292,11 @@ if [[ "${1:-}" == --cache-preflight ]]; then
 fi
 
 cleanup() {
-  local result=$? cache_kib
+  local result=$? cache_kib network_proven=0
   trap - EXIT INT TERM
   if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi
   if prove_restoration "$state" "$offline_started" 155; then
-    if [[ ! -f "$evidence/command-cleanup-failed" ]]; then
-      printf 'safe_to_upload=true\n' >> "$GITHUB_OUTPUT"
-    else result=1; fi
-    if [[ ! -f "$evidence/command-cleanup-failed" && -d "$compiler_cache" ]] && cache_kib="$(du -sk "$compiler_cache" | awk '{print $1}')"; then
-      printf 'directory=%s\nsizeKiB=%s\n' "$compiler_cache" "$cache_kib" > "$evidence/compiler-cache-size.txt"
-      if [[ "$cache_kib" =~ ^[0-9]+$ && "$cache_kib" -gt 0 && "$cache_kib" -le 2097152 ]]; then
-        printf 'compiler_cache_save_ok=true\n' >> "$GITHUB_OUTPUT"
-      fi
-    fi
+    network_proven=1
   else result=1; fi
   if [[ -n "$guard_pid" && ( "$offline_started" == 0 || -f "$state/restored" ) ]]; then
     kill "$guard_pid" 2>/dev/null || true
@@ -314,6 +306,15 @@ cleanup() {
     bounded_run 30 xcrun simctl io "$udid" screenshot "$evidence/final-screen.png" 2>/dev/null || true
     bounded_run 60 xcrun simctl shutdown "$udid" 2>/dev/null || true
   fi
+  if [[ "$network_proven" == 1 && ! -f "$evidence/command-cleanup-failed" ]]; then
+    printf 'safe_to_upload=true\n' >> "$GITHUB_OUTPUT"
+    if [[ -d "$compiler_cache" ]] && cache_kib="$(du -sk "$compiler_cache" | awk '{print $1}')"; then
+      printf 'directory=%s\nsizeKiB=%s\n' "$compiler_cache" "$cache_kib" > "$evidence/compiler-cache-size.txt"
+      if [[ "$cache_kib" =~ ^[0-9]+$ && "$cache_kib" -gt 0 && "$cache_kib" -le 2097152 ]]; then
+        printf 'compiler_cache_save_ok=true\n' >> "$GITHUB_OUTPUT"
+      fi
+    fi
+  else result=1; fi
   if [[ "$result" != 0 ]]; then passed=false; fi
   EXPECTED_SHA="$EXPECTED_SHA" EVIDENCE="$evidence" PASSED="$passed" RESULT="$result" UDID="$udid" ACTIVE_STAGE="$active_stage" python3 - <<'PY'
 import json, os, pathlib
