@@ -30,8 +30,12 @@ export default function Purchase() {
   let preview = '';
   try { preview = `${formatOMR(lineTotal(parseQuantity(draft.quantity), parseOMR(draft.price)))} OMR`; } catch {}
   const selection = (text: string, rows: ReferenceRow[]): Reference => {
-    const saved = text.trim() ? rows.find((row) => row.nameKey === referenceNameKey(text)) : undefined;
-    return saved ? { id: saved.id } : { name: text };
+    try {
+      const key = referenceNameKey(text);
+      const saved = rows.find((row) => row.nameKey === key);
+      if (saved) return { id: saved.id };
+    } catch {}
+    return { name: text };
   };
   const hint = (text: string, rows: ReferenceRow[], kind: string) => {
     if (!text.trim()) return null;

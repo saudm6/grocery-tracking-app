@@ -45,4 +45,15 @@ export const migrations = [
    );
    CREATE INDEX purchases_month ON purchases(month);
    CREATE INDEX history_product ON price_history(product_id, effective_month, effective_date, id);`,
+  `CREATE TABLE product_codes_v2 (
+     id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id),
+     namespace TEXT NOT NULL CHECK(namespace IN ('retail', 'qr')),
+     original_code TEXT NOT NULL CHECK(length(CAST(original_code AS BLOB)) > 0), scanner_format TEXT,
+     canonical_key TEXT NOT NULL CHECK(length(CAST(canonical_key AS BLOB)) > 0), UNIQUE(namespace, canonical_key),
+     CHECK(namespace != 'qr' OR length(CAST(original_code AS BLOB)) <= 4096)
+   );
+   INSERT INTO product_codes_v2(id, product_id, namespace, original_code, scanner_format, canonical_key)
+     SELECT id, product_id, namespace, original_code, scanner_format, canonical_key FROM product_codes;
+   DROP TABLE product_codes;
+   ALTER TABLE product_codes_v2 RENAME TO product_codes;`,
 ];
