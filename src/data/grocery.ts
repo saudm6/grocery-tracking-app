@@ -1,4 +1,5 @@
 import type { SQLiteBindValue } from 'expo-sqlite';
+import { normalizeCode, type CodeInput } from './code';
 import { migrations } from './schema';
 
 export interface Executor {
@@ -15,8 +16,12 @@ export type ReferenceRow = { id: number; name: string; nameKey: string };
 export type References = { brands: ReferenceRow[]; categories: ReferenceRow[]; stores: ReferenceRow[] };
 type ReferenceTable = 'brands' | 'categories' | 'stores';
 type ReferenceChange = { id?: number; name: string };
-type Grouping = { category: Reference; subcategoryId?: never } | { subcategoryId: number; category?: never };
+export type Grouping = { category: Reference; subcategoryId?: never } | { subcategoryId: number; category?: never };
 type NewProduct = { name: string; brand?: Reference | null; grouping: Grouping; id?: never };
+export type ProductInput = {
+  id?: number; name: string; brand?: Reference | null; grouping: Grouping;
+  savedPrice?: string; savedStore: Reference | null; code?: CodeInput; notInflation?: boolean;
+};
 export type PurchaseInput = {
   product: NewProduct | { id: number; name?: never };
   store: Reference;
@@ -26,7 +31,22 @@ export type PurchaseInput = {
   unitPrice: string;
   notInflation?: boolean;
 };
-type ProductRow = { id: number; brand_id: number | null; category_id: number | null; subcategory_id: number | null; saved_price: number | null; archived: number };
+type ProductRow = { id: number; brand_id: number | null; category_id: number | null; subcategory_id: number | null; saved_price: number | null; saved_store_id: number | null; archived: number };
+type SavedPriceUpdate =
+  | { kind: 'catalog'; price?: number; storeId: number | null; notInflation: boolean }
+  | { kind: 'purchase'; price: number; storeId: number; purchaseId: number; notInflation: boolean };
+export type ProductSummary = { id: number; name: string; brand: string | null; archived: boolean };
+export type ProductCode = { id: number; namespace: 'retail' | 'qr'; original: string; format: string | null; key: string };
+export type PriceObservation = {
+  id: number; price: number; storeId: number | null; store: string | null; source: 'saved_price' | 'receipt';
+  effectiveMonth: string; effectiveDate: string | null; recordedAt: string; included: boolean; sourcePurchaseId: number | null; baseline: boolean;
+};
+export type ProductDetails = ProductSummary & {
+  brandId: number | null; categoryId: number | null; category: string; subcategoryId: number | null; subcategory: string | null;
+  savedPrice: number | null; savedStoreId: number | null; savedStore: string | null;
+  codes: ProductCode[]; history: PriceObservation[]; canExcludeSavedPrice: boolean;
+  priceFirstSet: string | null; lastSavedPriceChanged: string | null;
+};
 export type PurchaseRow = {
   id: number; productId: number; product: string; brand: string | null; category: string; subcategory: string | null;
   store: string; month: string; purchaseDate: string | null; quantity: number; unitPrice: number; lineTotal: number;
@@ -75,6 +95,7 @@ export function localDate(now = new Date()): string {
 }
 function name(text: string): string {
   if (typeof text !== 'string' || !text.trim()) throw new Error('Names cannot be blank.');
+  if (text.includes('\0')) throw new Error('Names cannot contain NUL characters.');
   return text.trim().normalize('NFKC');
 }
 export function referenceNameKey(text: string): string { return name(text).toLocaleLowerCase('en-US'); }
@@ -124,13 +145,21 @@ async function writeReference(tx: Executor, table: ReferenceTable, input: Refere
   }
   return (await tx.runAsync(`INSERT INTO ${table}(name, name_key) VALUES (?, ?)`, label, key)).lastInsertRowId;
 }
-async function writeSavedPrice(tx: Executor, product: ProductRow, price: number, storeId: number, now: Date, purchaseId: number, notInflation: boolean) {
-  if (product.saved_price === price) return;
+async function hasPredecessor(db: Executor, productId: number, effectiveDate: string): Promise<boolean> {
+  return !!await db.getFirstAsync<{ id: number }>(`SELECT id FROM price_history WHERE product_id = ? AND
+    (effective_month < ? OR (effective_month = ? AND effective_date <= ?)) LIMIT 1`, productId, effectiveDate.slice(0, 7), effectiveDate.slice(0, 7), effectiveDate);
+}
+async function writeSavedPrice(tx: Executor, product: ProductRow, update: SavedPriceUpdate, now: Date) {
+  const { price, storeId, notInflation } = update;
+  if (price === undefined || product.saved_price === price) {
+    if (update.kind === 'catalog') await tx.runAsync('UPDATE products SET saved_store_id = ? WHERE id = ?', storeId, product.id);
+    return;
+  }
   const effectiveDate = localDate(now);
-  const earlier = await tx.getFirstAsync<{ id: number }>('SELECT id FROM price_history WHERE product_id = ? LIMIT 1', product.id);
+  const earlier = await hasPredecessor(tx, product.id, effectiveDate);
   await tx.runAsync('UPDATE products SET saved_price = ?, saved_store_id = ? WHERE id = ?', price, storeId, product.id);
   await tx.runAsync('INSERT INTO price_history(product_id, price, store_id, source, effective_month, effective_date, recorded_at, included, source_purchase_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    product.id, price, storeId, 'saved_price', effectiveDate.slice(0, 7), effectiveDate, now.toISOString(), earlier && notInflation ? 0 : 1, purchaseId);
+    product.id, price, storeId, 'saved_price', effectiveDate.slice(0, 7), effectiveDate, now.toISOString(), earlier && notInflation ? 0 : 1, update.kind === 'purchase' ? update.purchaseId : null);
 }
 async function readMonth(db: Executor, month: string): Promise<MonthReport> {
   const entries = await db.getAllAsync<Omit<PurchaseRow, 'lineTotal'>>(`SELECT p.id, p.product_id AS productId, pr.name AS product, b.name AS brand,
@@ -156,6 +185,69 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
   return {
     saveBrand(input: ReferenceChange) { return saveReference('brands', input); },
     saveStore(input: ReferenceChange) { return saveReference('stores', input); },
+    async saveProduct(input: ProductInput): Promise<number> {
+      const label = name(input.name);
+      const price = input.savedPrice === undefined || input.savedPrice.trim() === '' ? undefined : parseOMR(input.savedPrice);
+      const code = input.code === undefined ? undefined : normalizeCode(input.code);
+      let productId = 0;
+      await exclusive(db, async (tx) => {
+        const existing = input.id === undefined ? null : await tx.getFirstAsync<ProductRow>('SELECT * FROM products WHERE id = ?', id(input.id));
+        if (input.id !== undefined && (!existing || existing.archived)) throw new Error('Select an active product. Reactivate an archived product before editing.');
+        const brandId = input.brand ? await reference(tx, 'brands', input.brand) : null;
+        const categoryId = input.grouping.category ? await reference(tx, 'categories', input.grouping.category) : null;
+        const subcategoryId = input.grouping.subcategoryId === undefined ? null : id(input.grouping.subcategoryId);
+        const storeId = input.savedStore === null ? null : await reference(tx, 'stores', input.savedStore);
+        if (existing) {
+          productId = existing.id;
+          await tx.runAsync('UPDATE products SET name = ?, brand_id = ?, category_id = ?, subcategory_id = ? WHERE id = ?', label, brandId, categoryId, subcategoryId, productId);
+        } else {
+          productId = (await tx.runAsync('INSERT INTO products(name, brand_id, category_id, subcategory_id) VALUES (?, ?, ?, ?)', label, brandId, categoryId, subcategoryId)).lastInsertRowId;
+        }
+        if (code) {
+          const owner = await tx.getFirstAsync<{ product_id: number }>('SELECT product_id FROM product_codes WHERE namespace = ? AND canonical_key = CAST(? AS TEXT)', code.namespace, new TextEncoder().encode(code.key));
+          if (owner && owner.product_id !== productId) throw new Error('That code belongs to another product, including archived products. Open its details.');
+          // Expo iOS truncates TEXT bindings and reads at NUL. Bind bytes and retain TEXT identity.
+          if (!owner) await tx.runAsync('INSERT INTO product_codes(product_id, namespace, original_code, scanner_format, canonical_key) VALUES (?, ?, CAST(? AS TEXT), ?, CAST(? AS TEXT))', productId, code.namespace, new TextEncoder().encode(code.original), code.format, new TextEncoder().encode(code.key));
+        }
+        await writeSavedPrice(tx, existing ?? { id: productId, brand_id: brandId, category_id: categoryId, subcategory_id: subcategoryId, saved_price: null, saved_store_id: null, archived: 0 }, { kind: 'catalog', price, storeId, notInflation: input.notInflation === true }, clock());
+      });
+      return productId;
+    },
+    async listProducts(search = '', includeArchived = false): Promise<ProductSummary[]> {
+      const rows = await db.getAllAsync<Omit<ProductSummary, 'archived'> & { archived: number }>(`SELECT p.id, p.name, b.name AS brand, p.archived
+        FROM products p LEFT JOIN brands b ON b.id = p.brand_id WHERE (? = 1 OR p.archived = 0) ORDER BY p.name, p.id`, includeArchived);
+      const key = search.trim().normalize('NFKC').toLocaleLowerCase('en-US');
+      return rows.filter((row) => referenceNameKey(row.name).includes(key)).map((row) => ({ ...row, archived: row.archived === 1 }));
+    },
+    async lookupCode(input: CodeInput): Promise<ProductSummary | null> {
+      const code = normalizeCode(input);
+      const row = await db.getFirstAsync<Omit<ProductSummary, 'archived'> & { archived: number }>(`SELECT p.id, p.name, b.name AS brand, p.archived
+        FROM product_codes code JOIN products p ON p.id = code.product_id LEFT JOIN brands b ON b.id = p.brand_id WHERE code.namespace = ? AND code.canonical_key = CAST(? AS TEXT)`, code.namespace, new TextEncoder().encode(code.key));
+      return row ? { ...row, archived: row.archived === 1 } : null;
+    },
+    async getProductDetails(productId: number): Promise<ProductDetails> {
+      const product = await db.getFirstAsync<Omit<ProductDetails, 'codes' | 'history' | 'canExcludeSavedPrice' | 'priceFirstSet' | 'lastSavedPriceChanged' | 'archived'> & { archived: number }>(`SELECT p.id, p.name, b.name AS brand, p.brand_id AS brandId, p.archived,
+        p.category_id AS categoryId, c.name AS category, p.subcategory_id AS subcategoryId, sub.name AS subcategory,
+        p.saved_price AS savedPrice, p.saved_store_id AS savedStoreId, s.name AS savedStore
+        FROM products p LEFT JOIN brands b ON b.id = p.brand_id LEFT JOIN subcategories sub ON sub.id = p.subcategory_id
+        JOIN categories c ON c.id = COALESCE(p.category_id, sub.category_id) LEFT JOIN stores s ON s.id = p.saved_store_id WHERE p.id = ?`, id(productId));
+      if (!product) throw new Error('This product no longer exists.');
+      const codeRows = await db.getAllAsync<Omit<ProductCode, 'original' | 'key'> & { original: Uint8Array; key: Uint8Array }>('SELECT id, namespace, CAST(original_code AS BLOB) AS original, scanner_format AS format, CAST(canonical_key AS BLOB) AS key FROM product_codes WHERE product_id = ? ORDER BY id', productId);
+      const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+      const codes = codeRows.map((row) => ({ ...row, original: decoder.decode(row.original), key: decoder.decode(row.key) }));
+      const observations = await db.getAllAsync<Omit<PriceObservation, 'baseline' | 'included'> & { included: number }>(`SELECT h.id, h.price, h.store_id AS storeId, s.name AS store, h.source,
+        h.effective_month AS effectiveMonth, h.effective_date AS effectiveDate, h.recorded_at AS recordedAt, h.included, h.source_purchase_id AS sourcePurchaseId
+        FROM price_history h LEFT JOIN stores s ON s.id = h.store_id WHERE h.product_id = ? ORDER BY h.effective_month, h.effective_date IS NULL, h.effective_date, h.id`, productId);
+      const saved = observations.filter((row) => row.source === 'saved_price').sort((a, b) => a.id - b.id);
+      return { ...product, archived: product.archived === 1, codes, history: observations.map((row, position) => ({ ...row, included: row.included === 1, baseline: position === 0 })),
+        canExcludeSavedPrice: await hasPredecessor(db, productId, localDate(clock())), priceFirstSet: saved[0]?.recordedAt ?? null, lastSavedPriceChanged: saved.at(-1)?.recordedAt ?? null };
+    },
+    async setProductArchived(productId: number, archived: boolean): Promise<void> {
+      await exclusive(db, async (tx) => {
+        const result = await tx.runAsync('UPDATE products SET archived = ? WHERE id = ?', archived, id(productId));
+        if (!result.changes) throw new Error('This product no longer exists.');
+      });
+    },
     async recordPurchase(input: PurchaseInput): Promise<number> {
       const month = validateMonth(input.month);
       const purchaseDate = validateDate(input.purchaseDate, month);
@@ -177,13 +269,13 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
           const categoryId = grouping.category ? await reference(tx, 'categories', grouping.category) : null;
           const subcategoryId = grouping.subcategoryId !== undefined ? id(grouping.subcategoryId) : null;
           const result = await tx.runAsync('INSERT INTO products(name, brand_id, category_id, subcategory_id) VALUES (?, ?, ?, ?)', productName, brandId, categoryId, subcategoryId);
-          product = { id: result.lastInsertRowId, brand_id: brandId, category_id: categoryId, subcategory_id: subcategoryId, saved_price: null, archived: 0 };
+          product = { id: result.lastInsertRowId, brand_id: brandId, category_id: categoryId, subcategory_id: subcategoryId, saved_price: null, saved_store_id: null, archived: 0 };
         }
         const storeId = await reference(tx, 'stores', input.store);
         const result = await tx.runAsync('INSERT INTO purchases(product_id, brand_id, store_id, category_id, subcategory_id, month, purchase_date, quantity, unit_price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           product.id, product.brand_id, storeId, product.category_id, product.subcategory_id, month, purchaseDate, quantity, price, now.toISOString());
         purchaseId = result.lastInsertRowId;
-        if (month === localDate(now).slice(0, 7)) await writeSavedPrice(tx, product, price, storeId, now, purchaseId, input.notInflation === true);
+        if (month === localDate(now).slice(0, 7)) await writeSavedPrice(tx, product, { kind: 'purchase', price, storeId, purchaseId, notInflation: input.notInflation === true }, now);
         await readMonth(tx, month);
       });
       return purchaseId;
