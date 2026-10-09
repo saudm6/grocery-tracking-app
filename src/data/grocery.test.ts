@@ -124,6 +124,125 @@ test('inline creation rolls back after failure, rejects normalized duplicates, a
     assert.equal((await grocery.getMonth('2026-10')).purchases.length, 2);
   } finally { f.cleanup(); }
 });
+test('dedicated reference creates and ID renames refresh labels while preserving purchases, defaults and history after reopening', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    const brandId = await grocery.saveBrand({ name: ' Mazoon ' });
+    const storeId = await grocery.saveStore({ name: ' Local store ' });
+    assert.equal(brandId, 1);
+    assert.equal(storeId, 1);
+    assert.deepEqual(await grocery.listReferences(), { brands: [{ id: 1, name: 'Mazoon', nameKey: 'mazoon' }], stores: [{ id: 1, name: 'Local store', nameKey: 'local store' }], categories: [] });
+    await grocery.recordPurchase(input({ product: { name: 'Milk', brand: { id: brandId }, grouping: { category: { name: 'Dairy' } } }, store: { id: storeId }, month: '2026-09', quantity: '2', unitPrice: '2.000' }));
+    await grocery.recordPurchase(input({ product: { id: 1 }, store: { id: storeId } }));
+    assert.deepEqual(await f.db.getAllAsync('SELECT id, product_id, brand_id, store_id, quantity, unit_price FROM purchases ORDER BY id'), [
+      { id: 1, product_id: 1, brand_id: 1, store_id: 1, quantity: 2, unit_price: 2000 },
+      { id: 2, product_id: 1, brand_id: 1, store_id: 1, quantity: 3, unit_price: 1 },
+    ]);
+    assert.deepEqual(await f.db.getFirstAsync('SELECT brand_id, saved_price, saved_store_id FROM products'), { brand_id: 1, saved_price: 1, saved_store_id: 1 });
+    const purchases = await f.db.getAllAsync('SELECT * FROM purchases ORDER BY id');
+    const products = await f.db.getAllAsync('SELECT * FROM products ORDER BY id');
+    const history = await f.db.getAllAsync('SELECT * FROM price_history ORDER BY id');
+    assert.equal(await grocery.saveBrand({ id: brandId, name: ' MAZOON ' }), brandId);
+    assert.equal(await grocery.saveBrand({ id: brandId, name: ' Mazoon Dairy ' }), brandId);
+    assert.equal(await grocery.saveStore({ id: storeId, name: ' Neighborhood market ' }), storeId);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM purchases ORDER BY id'), purchases);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM products ORDER BY id'), products);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM price_history ORDER BY id'), history);
+    const reopened = open(f.path);
+    try {
+      await initializeDatabase(reopened.db);
+      const saved = createGrocery(reopened.db, now);
+      assert.deepEqual(await saved.listReferences(), { brands: [{ id: 1, name: 'Mazoon Dairy', nameKey: 'mazoon dairy' }], stores: [{ id: 1, name: 'Neighborhood market', nameKey: 'neighborhood market' }], categories: [{ id: 1, name: 'Dairy', nameKey: 'dairy' }] });
+      const old = await saved.getMonth('2026-09');
+      assert.equal(old.total, 4000);
+      assert.deepEqual(old.purchases[0], { id: 1, productId: 1, product: 'Milk', brand: 'Mazoon Dairy', category: 'Dairy', subcategory: null, store: 'Neighborhood market', month: '2026-09', purchaseDate: null, quantity: 2, unitPrice: 2000, lineTotal: 4000 });
+      const current = await saved.getMonth('2026-10');
+      assert.equal(current.total, 3);
+      assert.equal(current.purchases[0].brand, 'Mazoon Dairy');
+      assert.equal(current.purchases[0].store, 'Neighborhood market');
+    } finally { reopened.close(); }
+  } finally { f.cleanup(); }
+});
+test('dedicated and inline names share blank and normalized duplicate rejection without changing records', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.recordPurchase(input());
+    const brandNames = [' MAZOON ', 'Ｍａｚｏｏｎ'];
+    const storeNames = [' LOCAL STORE ', 'Ｌｏｃａｌ ｓｔｏｒｅ'];
+    for (const name of ['', ' \t\n ']) {
+      await assert.rejects(grocery.saveBrand({ name }), /blank/);
+      await assert.rejects(grocery.saveStore({ name }), /blank/);
+      await assert.rejects(grocery.saveBrand({ id: 1, name }), /blank/);
+      await assert.rejects(grocery.saveStore({ id: 1, name }), /blank/);
+      await assert.rejects(grocery.recordPurchase(input({ product: { name: 'Invalid brand', brand: { name }, grouping: { category: { id: 1 } } }, store: { id: 1 } })), /blank/);
+      await assert.rejects(grocery.recordPurchase(input({ product: { id: 1 }, store: { name } })), /blank/);
+    }
+    for (const name of brandNames) {
+      await assert.rejects(grocery.saveBrand({ name }), /already exists/);
+      await assert.rejects(grocery.recordPurchase(input({ product: { name: 'Duplicate brand', brand: { name }, grouping: { category: { id: 1 } } }, store: { id: 1 } })), /already exists/);
+    }
+    for (const name of storeNames) {
+      await assert.rejects(grocery.saveStore({ name }), /already exists/);
+      await assert.rejects(grocery.recordPurchase(input({ product: { name: 'Must roll back', brand: { id: 1 }, grouping: { category: { id: 1 } } }, store: { name } })), /already exists/);
+    }
+    const otherBrand = await grocery.saveBrand({ name: 'Other brand' });
+    const otherStore = await grocery.saveStore({ name: 'Other store' });
+    await assert.rejects(grocery.saveBrand({ id: otherBrand, name: ' MAZOON ' }), /already exists/);
+    await assert.rejects(grocery.saveStore({ id: otherStore, name: ' LOCAL STORE ' }), /already exists/);
+    for (const recordId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, 999]) {
+      await assert.rejects(grocery.saveBrand({ id: recordId, name: 'Missing brand' }), /valid saved record|no longer exists/);
+      await assert.rejects(grocery.saveStore({ id: recordId, name: 'Missing store' }), /valid saved record|no longer exists/);
+    }
+    assert.deepEqual(await grocery.listReferences(), { brands: [{ id: 1, name: 'Mazoon', nameKey: 'mazoon' }, { id: 2, name: 'Other brand', nameKey: 'other brand' }], stores: [{ id: 1, name: 'Local store', nameKey: 'local store' }, { id: 2, name: 'Other store', nameKey: 'other store' }], categories: [{ id: 1, name: 'Dairy', nameKey: 'dairy' }] });
+    assert.equal((await f.db.getAllAsync('SELECT * FROM products')).length, 1);
+    assert.equal((await grocery.getMonth('2026-10')).total, 3);
+    assert.equal(await grocery.saveStore({ name: 'Mazoon' }), 3);
+    assert.equal(await grocery.saveBrand({ name: 'Local store' }), 3);
+  } finally { f.cleanup(); }
+});
+test('failed brand and store renames roll back their labels and linked writes, then permit retry', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.recordPurchase(input());
+    for (const table of ['brands', 'stores'] as const) {
+      await f.db.execAsync(`CREATE TRIGGER reject_rename AFTER UPDATE ON ${table} BEGIN UPDATE purchases SET unit_price = 9; SELECT RAISE(ABORT, 'injected rename failure'); END;`);
+      await assert.rejects(table === 'brands' ? grocery.saveBrand({ id: 1, name: 'Corrected brand' }) : grocery.saveStore({ id: 1, name: 'Corrected store' }), /injected rename failure/);
+      assert.deepEqual(await grocery.listReferences(), { brands: [{ id: 1, name: 'Mazoon', nameKey: 'mazoon' }], stores: [{ id: 1, name: 'Local store', nameKey: 'local store' }], categories: [{ id: 1, name: 'Dairy', nameKey: 'dairy' }] });
+      assert.equal((await grocery.getMonth('2026-10')).total, 3);
+      assert.deepEqual(await f.db.getFirstAsync('SELECT id, product_id, brand_id, store_id, quantity, unit_price FROM purchases'), { id: 1, product_id: 1, brand_id: 1, store_id: 1, quantity: 3, unit_price: 1 });
+      assert.deepEqual(await f.db.getFirstAsync('SELECT saved_price, saved_store_id FROM products'), { saved_price: 1, saved_store_id: 1 });
+      assert.deepEqual(await f.db.getFirstAsync('SELECT price, store_id, source_purchase_id FROM price_history'), { price: 1, store_id: 1, source_purchase_id: 1 });
+      await f.db.execAsync('DROP TRIGGER reject_rename');
+    }
+    assert.equal(await grocery.saveBrand({ id: 1, name: 'Corrected brand' }), 1);
+    assert.equal(await grocery.saveStore({ id: 1, name: 'Corrected store' }), 1);
+    const purchase = (await grocery.getMonth('2026-10')).purchases[0];
+    assert.equal(purchase.brand, 'Corrected brand');
+    assert.equal(purchase.store, 'Corrected store');
+    assert.equal(purchase.lineTotal, 3);
+  } finally { f.cleanup(); }
+});
+test('dedicated reference submission saves once, retains a rejected name, and a fresh editor can save again', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    const submit = createSubmission();
+    await Promise.all([submit(() => grocery.saveStore({ name: 'First store' })), submit(() => grocery.saveStore({ name: 'First store' }))]);
+    await submit(() => grocery.saveStore({ name: 'Second store' }));
+    assert.deepEqual((await grocery.listReferences()).stores, [{ id: 1, name: 'First store', nameKey: 'first store' }]);
+    const retry = createSubmission();
+    const draft = { name: ' FIRST STORE ' };
+    await assert.rejects(retry(() => grocery.saveStore(draft)), /already exists/);
+    assert.equal(draft.name, ' FIRST STORE ');
+    draft.name = 'Second store';
+    assert.equal(await retry(() => grocery.saveStore(draft)), 2);
+    assert.equal(await createSubmission()(() => grocery.saveBrand({ name: 'New brand' })), 1);
+    assert.deepEqual((await grocery.listReferences()).stores, [{ id: 1, name: 'First store', nameKey: 'first store' }, { id: 2, name: 'Second store', nameKey: 'second store' }]);
+  } finally { f.cleanup(); }
+});
 test('monthly aggregate overflow rejects a whole save without partial references', async () => {
   const f = await fixture();
   try {
