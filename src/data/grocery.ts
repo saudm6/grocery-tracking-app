@@ -13,6 +13,8 @@ export interface Database extends Executor {
 export type Reference = { id: number; name?: never } | { name: string; id?: never };
 export type ReferenceRow = { id: number; name: string; nameKey: string };
 export type References = { brands: ReferenceRow[]; categories: ReferenceRow[]; stores: ReferenceRow[] };
+type ReferenceTable = 'brands' | 'categories' | 'stores';
+type ReferenceChange = { id?: number; name: string };
 type Grouping = { category: Reference; subcategoryId?: never } | { subcategoryId: number; category?: never };
 type NewProduct = { name: string; brand?: Reference | null; grouping: Grouping; id?: never };
 export type PurchaseInput = {
@@ -101,16 +103,25 @@ export async function initializeDatabase(db: Database, versions: readonly string
     }
   });
 }
-async function reference(tx: Executor, table: 'brands' | 'categories' | 'stores', input: Reference): Promise<number> {
+async function reference(tx: Executor, table: ReferenceTable, input: Reference): Promise<number> {
   if (input.id !== undefined) {
     const selected = await tx.getFirstAsync<{ id: number }>(`SELECT id FROM ${table} WHERE id = ?`, id(input.id));
     if (!selected) throw new Error('The selected reference no longer exists.');
     return selected.id;
   }
+  return writeReference(tx, table, input);
+}
+async function writeReference(tx: Executor, table: ReferenceTable, input: ReferenceChange): Promise<number> {
   const label = name(input.name);
   const key = referenceNameKey(label);
-  const duplicate = await tx.getFirstAsync<{ id: number }>(`SELECT id FROM ${table} WHERE name_key = ?`, key);
+  const selectedId = input.id === undefined ? null : id(input.id);
+  const duplicate = await tx.getFirstAsync<{ id: number }>(`SELECT id FROM ${table} WHERE name_key = ? AND (? IS NULL OR id != ?)`, key, selectedId, selectedId);
   if (duplicate) throw new Error(`That ${table.slice(0, -1)} already exists. Select the saved record.`);
+  if (selectedId !== null) {
+    const result = await tx.runAsync(`UPDATE ${table} SET name = ?, name_key = ? WHERE id = ?`, label, key, selectedId);
+    if (!result.changes) throw new Error('The selected reference no longer exists.');
+    return selectedId;
+  }
   return (await tx.runAsync(`INSERT INTO ${table}(name, name_key) VALUES (?, ?)`, label, key)).lastInsertRowId;
 }
 async function writeSavedPrice(tx: Executor, product: ProductRow, price: number, storeId: number, now: Date, purchaseId: number, notInflation: boolean) {
@@ -137,7 +148,14 @@ async function readMonth(db: Executor, month: string): Promise<MonthReport> {
   return { month, purchases, total: Number(total) };
 }
 export function createGrocery(db: Database, clock: () => Date = () => new Date()) {
+  const saveReference = async (table: 'brands' | 'stores', input: ReferenceChange): Promise<number> => {
+    let savedId = 0;
+    await exclusive(db, async (tx) => { savedId = await writeReference(tx, table, input); });
+    return savedId;
+  };
   return {
+    saveBrand(input: ReferenceChange) { return saveReference('brands', input); },
+    saveStore(input: ReferenceChange) { return saveReference('stores', input); },
     async recordPurchase(input: PurchaseInput): Promise<number> {
       const month = validateMonth(input.month);
       const purchaseDate = validateDate(input.purchaseDate, month);
