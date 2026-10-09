@@ -79,7 +79,8 @@ def record(event, **details):
     row = {'event': event, 'command': pathlib.Path(sys.argv[2]).name,
            'ownedGroup': p.pid if p is not None else None, **details}
     encoded = json.dumps(row)
-    print('[bounded] ' + encoded, file=sys.stderr, flush=True)
+    try: print('[bounded] ' + encoded, file=sys.stderr, flush=True)
+    except OSError: pass
     marker = os.getenv('BOUNDED_CLEANUP_FAILED_FILE')
     if marker and event == 'cleanup-failed':
         with pathlib.Path(marker).open('a') as stream: stream.write(encoded + '\n')
