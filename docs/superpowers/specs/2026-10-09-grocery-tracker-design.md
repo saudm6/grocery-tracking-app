@@ -62,12 +62,15 @@ The monthly view and Home query the same purchase entries. Changing an entry's m
 
 Two shapes were compared. A pure catalog model stores only links in purchases; it is smaller but recategorizing a product would silently rewrite older category totals. A full purchase snapshot copies every product and store label into each entry; it preserves old labels but adds duplicated data and more rules for edits. The proposed design uses the purchase-ledger candidate for historical price and category accuracy, with the catalog-first candidate's month-only entry flow and lean Home analytics. It keeps the reusable catalog, records price and category on each purchase, and derives analytics from those entries. Product and store renames remain visible in old entries by design.
 
+## Confirmed decision
+
+Scanning supports both standard grocery UPC/EAN barcodes and QR codes.
+
 ## Decisions to confirm before app code
 
-1. Should scanning support grocery UPC/EAN barcodes **and** QR codes? This draft assumes both.
-2. Is **OMR** the only currency needed at first?
-3. Does quantity need weights or volumes such as **0.5 kg**, or is a whole-number item count enough?
-4. When adding a product in the catalog, should price and store be saved as suggestions for later purchases, or is the **Record purchase** action enough? This draft keeps price and store on purchases only.
+1. Is **OMR** the only currency needed at first?
+2. Does quantity need weights or volumes such as **0.5 kg**, or is a whole-number item count enough?
+3. When adding a product in the catalog, should price and store be saved as suggestions for later purchases, or is the **Record purchase** action enough? This draft keeps price and store on purchases only.
 
 ## First implementation slice after approval
 
