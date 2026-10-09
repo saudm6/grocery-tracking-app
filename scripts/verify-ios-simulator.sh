@@ -219,7 +219,7 @@ if [[ "${1:-}" == --self-test ]]; then
   [[ "$(wc -l < "$test_dir/probe-events" | tr -d ' ')" == 1 ]]
   evidence="$test_dir"
   run_stage fixture-success 5 "$(python3 -c 'import sys; print(sys.executable)')" -c 'print("full diagnostic retained")'
-  rg -q '^full diagnostic retained' "$evidence/fixture-success.log"
+  grep -q '^full diagnostic retained' "$evidence/fixture-success.log"
   if run_stage fixture-failure 5 "$(python3 -c 'import sys; print(sys.executable)')" -c 'raise SystemExit(9)'; then
     exit 1
   else [[ "$?" == 9 ]]; fi
@@ -233,8 +233,8 @@ if [[ "${1:-}" == --self-test ]]; then
   if run_stage fixture-traceback 5 "$(python3 -c 'import sys; print(sys.executable)')" -c 'raise RuntimeError("fixture diagnostic visible")' > "$test_dir/traceback-console.txt"; then
     exit 1
   else [[ "$?" == 1 ]]; fi
-  rg -q '^RuntimeError: fixture diagnostic visible' "$test_dir/traceback-console.txt"
-  rg -q '"reason": "child-exit".*"exitCode": 1' "$test_dir/traceback-console.txt"
+  grep -q '^RuntimeError: fixture diagnostic visible' "$test_dir/traceback-console.txt"
+  grep -q '"reason": "child-exit".*"exitCode": 1' "$test_dir/traceback-console.txt"
   [[ ! -f "$evidence/command-cleanup-failed" ]]
   python3 - "${BASH_SOURCE[0]}" "$test_dir" <<'PY'
 import os, pathlib, signal, subprocess, sys, time
@@ -502,7 +502,7 @@ PY
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")" == com.saudm6.grocerytracker ]]
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")"
 xcrun lipo -archs "$app/$executable" > "$evidence/app-architecture.txt"
-rg -q x86_64 "$evidence/app-architecture.txt"
+grep -q x86_64 "$evidence/app-architecture.txt"
 shasum -a 256 "$app/main.jsbundle" "$app/$executable" > "$evidence/app-checksums.txt"
 tar -czf "$evidence/app.tar.gz" -C "$(dirname "$app")" "$(basename "$app")"
 xcrun simctl install "$udid" "$app"
