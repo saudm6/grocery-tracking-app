@@ -1,6 +1,6 @@
 # Grocery tracker app design
 
-**Status:** Draft for review. This document describes the app; no app implementation has started.
+**Status:** Final design for the first version. This document describes the app; no app implementation has started.
 
 ## Goal
 
@@ -12,7 +12,7 @@ Build an Expo app for recording groceries bought, the store, quantity, and price
 | --- | --- |
 | Home | Analytics only: selected-month total, previous-month comparison, spending by category and subcategory, and spending by store. Values refresh after a purchase is added, edited, or removed. |
 | Total Spending | Choose a year and month. See that month's total and every purchase entry, including repeat purchases of one product. The top-right **Add** action opens the purchase form. Each entry shows the exact product and brand, its category/subcategory, quantity, unit price, line total, and store; open an entry to correct or delete it. |
-| Inflation | Filter by category and inclusive start/end month. See products whose included saved-price changes rose in that period, with the earlier price, later price, OMR increase, percentage increase, and a small price-over-time chart. Changes marked **Not inflation** are omitted from its charts and comparisons. Tap a product to open its details. |
+| Inflation | Filter by category and inclusive start/end month. See products whose counted saved-price changes rose in that period, with their saved price as of the selected end month, counted OMR increase, percentage increase, and a small price-over-time chart. Changes marked **Not inflation** are omitted from its charts and increase calculations. Tap a product to open its details. |
 | Products | Search, view, add, and edit catalog products, including their saved price and store. Add with a scan or by typing a code; products without a code can also be added manually. A product can be saved without recording spending. Product details show brand, category/subcategory, linked products in that subcategory, codes, saved price/store, when the price last changed, its full price history with editable **Not inflation** marks, and purchases with their actual paid prices. |
 | Brands | Dedicated list and add/rename page. |
 | Categories | Dedicated list and add/rename page, showing each category's subcategories. |
@@ -67,7 +67,9 @@ The app-facing operations are `lookupCode(code)`, `saveProduct(input)`, `getProd
 
 ## Inflation calculations
 
-For each product, the selected start price is the latest included saved price known at the start of the chosen range, or its first included price recorded inside the range. The end price is the latest included saved price recorded through the last day of the selected end month. The page lists products with at least two included prices and a positive net change, sorted by the OMR increase. It shows `end − start` in OMR and `(end − start) ÷ start` as a percentage; a zero start price has no percentage. An excluded change is skipped as both a chart point and comparison baseline. Products with only one included price are shown in details but are not labeled as having increased. The category filter uses each product's current category, so moving its subcategory also reclassifies past price points in that filter. Product details list the full dated price history, including decreases, excluded changes, and the store saved with each price; charts use included prices only.
+For each saved-price change after the first price, the app compares the new price with the **immediately preceding actual saved price**, whether or not that preceding change was marked **Not inflation**. A change marked **Not inflation** contributes zero to Inflation; an included change contributes its signed price difference. The selected inclusive month range sums only included changes recorded during that range. The page lists products with a positive counted net change, sorted by that OMR amount. Its percentage is the counted net change divided by the actual saved price immediately before the first included change in the range; a zero reference price has no percentage. The page shows the actual saved price as of the selected end month separately, since excluded changes can make the difference between two displayed prices larger than the counted increase.
+
+For example, 20.000 → 22.000 OMR marked **Not inflation**, followed by an included 22.000 → 23.000 OMR change, contributes **1.000 OMR** to Inflation, not 3.000 OMR. The percentage for a range containing only that included change is `1 ÷ 22`. The price-over-time chart plots actual saved prices at included changes within the range, plus the first baseline if it falls in the range. It omits excluded points and leaves a gap across an excluded change rather than drawing a continuous line that implies the whole gap counts as inflation. A point's counted change is measured from the preceding actual saved price, which is visible in the full product history. The category filter uses each product's current category, so moving its subcategory also reclassifies past price points in that filter. Product details list the full dated price history, including decreases, excluded changes, and the store saved with each price.
 
 This page reflects prices entered into this app, not an official inflation index. A price change that was never recorded cannot appear in its trend.
 
@@ -98,13 +100,13 @@ Two shapes were compared. A pure catalog model stores only links in purchases; i
 - Products can hold a saved price and store for new purchases; each purchase preserves its actual price and store when those product defaults change.
 - Product saved-price changes keep dated history; the Inflation tab compares those prices by category and month and links to product details.
 - Confirming a different price when adding a current-month purchase updates the product's saved price and Inflation history while preserving older purchases.
-- A price change marked **Not inflation** remains in product history and the current saved price, but is excluded from Inflation charts and increase calculations.
+- A price change marked **Not inflation** remains in product history and the current saved price, but contributes zero to Inflation; its actual price is the baseline for the next change.
 - Categories contain movable subcategories that link products, so spending on Milk can include purchases from different brands while each entry keeps its exact product.
 - A subcategory can have one current primary brand; it changes manual suggestions, while scans and purchases retain exact product and brand identity.
 - Moving a subcategory to another category also moves its past spending and price-change points into the new category's reports.
 
 ## First implementation slice after approval
 
-Set up the Expo project, SQLite schema, and code lookup/record-purchase boundary. Verify that an unknown scan plus inline brand/category/subcategory/store creates one complete purchase, a repeated scan cannot create a duplicate unintentionally, and rescanning a known product at 22.000 OMR after a 20.000 OMR purchase adds one dated price change while the older month stays at 20.000 OMR. Verify that **Not inflation** keeps that change in history but removes it from Inflation comparisons, switching Milk's primary brand leaves purchases intact, and moving Milk reclassifies its past category totals. Then build the screens around those operations.
+Set up the Expo project, SQLite schema, and code lookup/record-purchase boundary. Verify that an unknown scan plus inline brand/category/subcategory/store creates one complete purchase, a repeated scan cannot create a duplicate unintentionally, and rescanning a known product at 22.000 OMR after a 20.000 OMR purchase adds one dated price change while the older month stays at 20.000 OMR. Verify that an excluded 20.000 → 22.000 OMR change followed by an included 22.000 → 23.000 OMR change counts as 1.000 OMR on Inflation, switching Milk's primary brand leaves purchases intact, and moving Milk reclassifies its past category totals. Then build the screens around those operations.
 
 No cloud account, cross-device sync, receipt import, or online product search is included in this first design. A local-only database can be lost if the app is uninstalled or the device is lost; export or backup should be designed before relying on it as the only long-term record.
