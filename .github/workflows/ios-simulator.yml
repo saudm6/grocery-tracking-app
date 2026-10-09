@@ -46,9 +46,10 @@ jobs:
           node tests/native/assert-ios-db.mjs --self-test
           bash scripts/verify-ios-simulator.sh --self-test
       - name: Build and exercise the native Release app
+        id: native
         run: bash scripts/verify-ios-simulator.sh
       - name: Upload native evidence
-        if: always()
+        if: always() && steps.native.outputs.safe_to_upload == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ios-simulator-${{ env.EXPECTED_SHA }}

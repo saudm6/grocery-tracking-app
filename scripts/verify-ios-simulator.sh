@@ -30,6 +30,43 @@ guard_restore() {
   fi
 }
 
+probe() {
+  local phase="$1" expectation="$2" label url code
+  for label in github apple ipv4; do
+    case "$label" in
+      github) url=https://github.com ;;
+      apple) url=https://developer.apple.com ;;
+      ipv4) url=http://1.1.1.1 ;;
+    esac
+    if curl --noproxy '*' --silent --show-error --head --connect-timeout 2 --max-time 5 "$url" > "$state/$phase-$label.txt" 2>&1; then code=0; else code=$?; fi
+    printf '%s %s %s %s\n' "$(date -u '+%FT%TZ')" "$phase" "$label" "$code" >> "$state/probes.log"
+    if [[ "$expectation" == online ]]; then [[ "$code" == 0 ]] || return 1; else [[ "$code" != 0 ]] || return 1; fi
+  done
+  if [[ -f "$state/ipv6-available" ]]; then
+    if curl --noproxy '*' --silent --show-error --head --connect-timeout 2 --max-time 5 'http://[2606:4700:4700::1111]' > "$state/$phase-ipv6.txt" 2>&1; then code=0; else code=$?; fi
+    printf '%s %s ipv6 %s\n' "$(date -u '+%FT%TZ')" "$phase" "$code" >> "$state/probes.log"
+    if [[ "$expectation" == online ]]; then [[ "$code" == 0 ]] || return 1; else [[ "$code" != 0 ]] || return 1; fi
+  fi
+  if [[ -n "$loopback_pid" ]]; then
+    curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:9187/ > /dev/null
+  fi
+}
+
+prove_restoration() {
+  local network_state="$1" withdrawn="$2" wait_seconds="$3" deadline
+  if [[ "$withdrawn" == 1 ]]; then
+    if ! restore_network "$network_state"; then
+      deadline=$((SECONDS + wait_seconds))
+      while [[ ! -f "$network_state/restored" ]]; do
+        (( SECONDS < deadline )) || return 1
+        sleep 0.2
+      done
+    fi
+  fi
+  probe after online || return 1
+  date -u '+%FT%TZ' > "$network_state/restoration-proven"
+}
+
 bounded_run() {
   local seconds="$1"
   shift
@@ -65,12 +102,47 @@ if [[ "${1:-}" == --self-test ]]; then
   wait "$guard_test_pid"
   [[ -f "$test_dir/guard/guard-fired" && -f "$test_dir/guard/restored" ]]
   [[ "$(wc -l < "$test_dir/restored-interfaces" | tr -d ' ')" == 4 ]]
+  mkdir "$test_dir/recovered" "$test_dir/persistent" "$test_dir/probe-failure" "$test_dir/early"
+  printf 'en0\n' | tee "$test_dir/recovered/interfaces" "$test_dir/persistent/interfaces" > "$test_dir/probe-failure/interfaces"
+  state="$test_dir/recovered" loopback_pid=mock probe_fails=0 restore_calls=0
+  touch "$test_dir/loopback-alive"
+  interface_up() {
+    restore_calls="$(cat "$test_dir/restore-calls" 2>/dev/null || printf 0)"
+    restore_calls=$((restore_calls + 1))
+    printf '%s\n' "$restore_calls" > "$test_dir/restore-calls"
+    [[ "$restore_calls" -gt 1 ]]
+  }
+  curl() {
+    if [[ "$*" == *127.0.0.1* ]]; then
+      [[ -f "$test_dir/loopback-alive" && -f "$state/restored" ]] || return 1
+      printf 'loopback after restore\n' >> "$test_dir/probe-events"
+    fi
+    [[ "$probe_fails" == 0 ]]
+  }
+  guard_restore "$state" 1 &
+  recovery_pid=$!
+  prove_restoration "$state" 1 3
+  wait "$recovery_pid"
+  [[ -f "$state/guard-fired" && -f "$state/restoration-proven" && -f "$test_dir/loopback-alive" ]]
+  [[ "$(wc -l < "$test_dir/probe-events" | tr -d ' ')" == 1 ]]
+  state="$test_dir/persistent"
+  interface_up() { return 1; }
+  if prove_restoration "$state" 1 1; then exit 1; fi
+  [[ ! -f "$state/restoration-proven" ]]
+  state="$test_dir/probe-failure" probe_fails=1
+  interface_up() { return 0; }
+  if prove_restoration "$state" 1 1; then exit 1; fi
+  [[ -f "$state/restored" && ! -f "$state/restoration-proven" ]]
+  state="$test_dir/early" loopback_pid='' probe_fails=0
+  prove_restoration "$state" 0 1
+  [[ -f "$state/restoration-proven" && ! -f "$state/restored" ]]
+  [[ "$(wc -l < "$test_dir/probe-events" | tr -d ' ')" == 1 ]]
   if bounded_run 1 "$(python3 -c 'import sys; print(sys.executable)')" -c 'import time; time.sleep(30)'; then
     exit 1
   else
     [[ "$?" == 124 ]]
   fi
-  printf 'Network helper self-test passed: idempotent restore, independent timed restore, process deadline. No host interface commands ran.\n'
+  printf 'Network helper self-test passed: idempotent/timed restore, failed immediate restore recovery with live loopback, persistent restore/probe failure denial, early build diagnostics, process deadline. No host interface commands ran.\n'
   exit 0
 fi
 
@@ -92,36 +164,15 @@ state="$evidence/network"
 mkdir -p "$state" "$tools_dir" "$evidence/maestro" "$evidence/database"
 udid='' guard_pid='' monitor_pid='' loopback_pid='' offline_started=0 passed=false
 
-probe() {
-  local phase="$1" expectation="$2" label url code
-  for label in github apple ipv4; do
-    case "$label" in
-      github) url=https://github.com ;;
-      apple) url=https://developer.apple.com ;;
-      ipv4) url=http://1.1.1.1 ;;
-    esac
-    if curl --noproxy '*' --silent --show-error --head --connect-timeout 2 --max-time 5 "$url" > "$state/$phase-$label.txt" 2>&1; then code=0; else code=$?; fi
-    printf '%s %s %s %s\n' "$(date -u '+%FT%TZ')" "$phase" "$label" "$code" >> "$state/probes.log"
-    if [[ "$expectation" == online ]]; then [[ "$code" == 0 ]] || return 1; else [[ "$code" != 0 ]] || return 1; fi
-  done
-  if [[ -f "$state/ipv6-available" ]]; then
-    if curl --noproxy '*' --silent --show-error --head --connect-timeout 2 --max-time 5 'http://[2606:4700:4700::1111]' > "$state/$phase-ipv6.txt" 2>&1; then code=0; else code=$?; fi
-    printf '%s %s ipv6 %s\n' "$(date -u '+%FT%TZ')" "$phase" "$code" >> "$state/probes.log"
-    if [[ "$expectation" == online ]]; then [[ "$code" == 0 ]] || return 1; else [[ "$code" != 0 ]] || return 1; fi
-  fi
-  curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:9187/ > /dev/null
-}
-
 cleanup() {
   local result=$?
   trap - EXIT INT TERM
   if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi
-  if [[ "$offline_started" == 1 ]]; then
-    restore_network "$state" || result=1
-    if [[ -f "$state/restored" ]]; then
-      if [[ -n "$guard_pid" ]]; then kill "$guard_pid" 2>/dev/null || true; fi
-      probe after online || result=1
-    else result=1; fi
+  if prove_restoration "$state" "$offline_started" 155; then
+    printf 'safe_to_upload=true\n' >> "$GITHUB_OUTPUT"
+  else result=1; fi
+  if [[ -n "$guard_pid" && ( "$offline_started" == 0 || -f "$state/restored" ) ]]; then
+    kill "$guard_pid" 2>/dev/null || true
   fi
   if [[ -n "$loopback_pid" ]]; then kill "$loopback_pid" 2>/dev/null || true; fi
   if [[ -n "$udid" ]]; then
@@ -136,7 +187,9 @@ receipt = {'sourceSHA': os.environ['EXPECTED_SHA'], 'workflowSHA': os.getenv('GI
            'runID': os.getenv('GITHUB_RUN_ID'), 'simulatorUDID': os.environ['UDID'],
            'nativeOfflineSmokePassed': os.environ['PASSED'] == 'true', 'exitCode': int(os.environ['RESULT']),
            'bundleIdentifier': 'com.saudm6.grocerytracker', 'configuration': 'Release',
-           'networkRestored': (p/'network/restored').exists(), 'timedGuardFired': (p/'network/guard-fired').exists(),
+           'networkRestored': (p/'network/restored').exists(),
+           'networkRestorationProven': (p/'network/restoration-proven').exists(),
+           'timedGuardFired': (p/'network/guard-fired').exists(),
            'limits': ['Simulator, not physical iPhone', 'Manual-purchase slice only; final issue 18 audit follows features',
                       'No physical camera or spoken screen-reader proof']}
 (p/'receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
