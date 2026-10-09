@@ -17,7 +17,7 @@ function ProductEditor({ product, references, readError, refresh }: { product: P
   const grocery = useGrocery();
   const [name, setName] = useState(product?.name ?? '');
   const [brand, setBrand] = useState<Reference>(product?.brandId ? { id: product.brandId } : { name: '' });
-  const [grouping, setGrouping] = useState<Grouping>(product ? product.subcategoryId !== null ? { subcategoryId: product.subcategoryId } : { category: { id: product.categoryId! } } : { category: { name: '' } });
+  const [grouping, setGrouping] = useState<Grouping>(product ? product.subcategoryId !== null ? { subcategory: { id: product.subcategoryId } } : { category: { id: product.categoryId! } } : { category: { name: '' } });
   const [price, setPrice] = useState(product?.savedPrice === null || !product ? '' : formatOMR(product.savedPrice));
   const [store, setStore] = useState<Reference>(product?.savedStoreId ? { id: product.savedStoreId } : { name: '' });
   const [format, setFormat] = useState<CodeFormat | 'none'>('none');
@@ -66,7 +66,7 @@ function ProductEditor({ product, references, readError, refresh }: { product: P
     <Field label="Product name" value={name} onChangeText={setName} editable={editing} autoFocus />
     <ReferenceField label="Brand (optional)" kind="brand" value={brand} rows={references.brands} onChange={setBrand} editable={editing} />
     <Action label="Use no brand" disabled={!editing} onPress={() => setBrand({ name: '' })} />
-    {grouping.subcategoryId !== undefined ? <><Text>Keep grouping · {product?.category} / {product?.subcategory}</Text><Action label="Choose a direct category instead" disabled={!editing} onPress={() => setGrouping({ category: { name: '' } })} /></> : <ReferenceField label="Direct category" kind="category" value={grouping.category} rows={references.categories} onChange={(category) => setGrouping({ category })} editable={editing} />}
+    {grouping.subcategory !== undefined ? <><Text>Keep grouping · {product?.category} / {product?.subcategory}</Text><Action label="Choose a direct category instead" disabled={!editing} onPress={() => setGrouping({ category: { name: '' } })} /></> : <ReferenceField label="Direct category" kind="category" value={grouping.category} rows={references.categories} onChange={(category) => setGrouping({ category })} editable={editing} />}
     <Field label="Saved price (optional, OMR)" value={price} onChangeText={setPrice} editable={editing} keyboardType="decimal-pad" placeholder="0.000" />
     <Text>{product?.savedPrice !== null && product ? 'A blank price keeps the existing saved price.' : 'Leave price blank to save without a price observation.'}</Text>
     <ReferenceField label="Saved store (optional)" kind="store" value={store} rows={references.stores} onChange={setStore} editable={editing} />
