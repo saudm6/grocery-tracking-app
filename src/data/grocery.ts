@@ -95,6 +95,7 @@ export function localDate(now = new Date()): string {
 }
 function name(text: string): string {
   if (typeof text !== 'string' || !text.trim()) throw new Error('Names cannot be blank.');
+  if (text.includes('\0')) throw new Error('Names cannot contain NUL characters.');
   return text.trim().normalize('NFKC');
 }
 export function referenceNameKey(text: string): string { return name(text).toLocaleLowerCase('en-US'); }

@@ -616,3 +616,34 @@ test('catalog submission admits one product/event, keeps pending for suppressed 
     assert.equal((await grocery.getMonth('2026-10')).total, 0);
   } finally { f.cleanup(); }
 });
+
+test('shared human names reject NUL without truncation or partial writes while opaque QR retains it', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.recordPurchase(input());
+    const tables = ['brands', 'categories', 'stores', 'products', 'product_codes', 'purchases', 'price_history'];
+    const before = await Promise.all(tables.map((table) => f.db.getAllAsync(`SELECT * FROM ${table} ORDER BY id`)));
+    for (const name of ['\0prefix', 'Milk\0suffix']) {
+      assert.throws(() => referenceNameKey(name), /NUL/);
+      await assert.rejects(grocery.saveBrand({ name }), /NUL/);
+      await assert.rejects(grocery.saveBrand({ id: 1, name }), /NUL/);
+      await assert.rejects(grocery.saveStore({ name }), /NUL/);
+      await assert.rejects(grocery.saveStore({ id: 1, name }), /NUL/);
+      await assert.rejects(grocery.saveProduct(catalog({ name, grouping: { category: { id: 1 } } })), /NUL/);
+      await assert.rejects(grocery.saveProduct(catalog({ id: 1, name, grouping: { category: { id: 1 } } })), /NUL/);
+      for (const change of [{ brand: { name } }, { grouping: { category: { name } } }, { savedStore: { name } }]) {
+        await assert.rejects(grocery.saveProduct(catalog({ id: 1, name: 'Changed name', grouping: { category: { id: 1 } }, savedPrice: '0.002', ...change })), /NUL/);
+      }
+      await assert.rejects(grocery.recordPurchase(input({ product: { name, grouping: { category: { id: 1 } } }, store: { id: 1 } })), /NUL/);
+      await assert.rejects(grocery.recordPurchase(input({ product: { name: 'Rollback product', brand: { name }, grouping: { category: { id: 1 } } }, store: { id: 1 } })), /NUL/);
+      await assert.rejects(grocery.recordPurchase(input({ product: { name: 'Rollback product', grouping: { category: { name } } }, store: { id: 1 } })), /NUL/);
+      await assert.rejects(grocery.recordPurchase(input({ product: { name: 'Rollback product', grouping: { category: { id: 1 } } }, store: { name } })), /NUL/);
+      assert.deepEqual(await Promise.all(tables.map((table) => f.db.getAllAsync(`SELECT * FROM ${table} ORDER BY id`))), before);
+    }
+    await grocery.saveProduct(catalog({ id: 1, name: 'Milk', brand: { id: 1 }, grouping: { category: { id: 1 } }, savedStore: { id: 1 }, code: { format: 'qr', value: 'Milk\0suffix' } }));
+    assert.equal((await grocery.lookupCode({ format: 'qr', value: 'Milk\0suffix' }))?.id, 1);
+    assert.equal((await grocery.getProductDetails(1)).codes[0].original, 'Milk\0suffix');
+    assert.equal((await grocery.getMonth('2026-10')).total, 3);
+  } finally { f.cleanup(); }
+});

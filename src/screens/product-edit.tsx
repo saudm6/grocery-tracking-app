@@ -49,7 +49,7 @@ function ProductEditor({ product, references, readError, refresh }: { product: P
         const productId = await grocery.saveProduct({ id: product?.id, name, brand: brand.id !== undefined || brand.name.trim() ? brand : null, grouping,
           savedPrice: price, savedStore: store.id !== undefined || store.name.trim() ? store : null,
           code: format === 'none' ? undefined : { format, value: code }, notInflation: canExclude && notInflation });
-        router.replace({ pathname: '/product/[id]', params: { id: productId } });
+        router.dismissTo({ pathname: '/product/[id]', params: { id: productId } });
         return productId;
       });
     } catch (failure) {
@@ -62,7 +62,7 @@ function ProductEditor({ product, references, readError, refresh }: { product: P
   return <>
     <Text accessibilityRole="header" style={{ fontSize: 22 }}>{product ? 'Edit product' : 'Add product'}</Text>
     <Text>This saves catalog defaults without recording a purchase or changing spending.</Text>
-    {product?.archived ? <><ErrorMessage message="This product is archived. Reactivate it from its details before editing. Your entries are kept." /><Action label="Open archived product details" onPress={() => router.replace({ pathname: '/product/[id]', params: { id: product.id } })} /></> : null}
+    {product?.archived ? <><ErrorMessage message="This product is archived. Reactivate it from its details before editing. Your entries are kept." /><Action label="Open archived product details" onPress={() => router.dismissTo({ pathname: '/product/[id]', params: { id: product.id } })} /></> : null}
     <Field label="Product name" value={name} onChangeText={setName} editable={editing} autoFocus />
     <ReferenceField label="Brand (optional)" kind="brand" value={brand} rows={references.brands} onChange={setBrand} editable={editing} />
     <Action label="Use no brand" disabled={!editing} onPress={() => setBrand({ name: '' })} />
