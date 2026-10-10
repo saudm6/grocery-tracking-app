@@ -411,7 +411,7 @@ test('product paid lists retain recorded amounts and identity through catalog ed
     assert.deepEqual(await grocery.listProductPurchases(1), expected);
     assert.deepEqual(await grocery.listProductPurchases(otherId), [{ id: 3, productId: 2, product: 'Milk', brand: 'Other brand', category: 'Dairy', subcategory: null, store: 'Local store', month: '2026-09', purchaseDate: null, quantity: 1, unitPrice: 7000, lineTotal: 7000 }]);
     assert.deepEqual(await grocery.listProductPurchases(999), []);
-    assert.throws(() => grocery.listProductPurchases(0), /valid saved record/);
+    await assert.rejects(grocery.listProductPurchases(0), /valid saved record/);
     assert.deepEqual(await storedState(f.db), beforeRead);
     await f.db.execAsync('ALTER TABLE purchases RENAME COLUMN unit_price TO unavailable_price');
     try { await assert.rejects(grocery.listProductPurchases(1), /no such column/); }

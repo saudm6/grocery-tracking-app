@@ -407,7 +407,7 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       });
     },
     getMonth(month: string) { return readMonth(db, validateMonth(month)); },
-    listProductPurchases(productId: number) { return readPurchases(db, 'product_id', id(productId)); },
+    async listProductPurchases(productId: number): Promise<PurchaseRow[]> { return readPurchases(db, 'product_id', id(productId)); },
     async listReferences(): Promise<References> {
       const [brands, categories, stores, subcategories] = await Promise.all([
         db.getAllAsync<ReferenceRow>('SELECT id, name, name_key AS nameKey FROM brands ORDER BY name_key'),
