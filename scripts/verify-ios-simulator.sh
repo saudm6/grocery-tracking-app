@@ -537,7 +537,7 @@ bounded_file.write_text(bounded, encoding='utf-8', newline='\n')
 
 def diagnostics(mode, directory, primary, reader=None):
     try:
-        for name in ('console.txt', 'loopback.log', 'loopback-cleanup.txt', 'command-cleanup-failed'):
+        for name in ('console.txt', 'signal-delivery.json', 'loopback.log', 'loopback-cleanup.txt', 'command-cleanup-failed'):
             path = directory/name
             if not path.exists(): continue
             text = reader(path) if reader else path.read_text()
@@ -606,9 +606,11 @@ def free_port():
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         return listener.getsockname()[1]
-modes = ['immediate', 'delayed', 'dead', 'wrong', 'timeout', 'competitor', 'SIGINT', 'SIGTERM', 'failure', 'diagnostic-failure']
-if os.name == 'posix': modes.append('no-delivery')
-else: print('Loopback/no-delivery: POSIX group-deadline/server fallback requires hosted macOS; not claimed on Windows')
+modes = ['immediate', 'delayed', 'dead', 'wrong', 'timeout', 'competitor']
+if os.name == 'posix': modes += ['SIGINT', 'SIGTERM', 'failure', 'diagnostic-failure', 'no-delivery']
+else:
+    modes += ['failure', 'diagnostic-failure']
+    print('Loopback/SIGINT/SIGTERM/no-delivery: POSIX wrapper signals/group fallback require hosted macOS; not claimed on Windows')
 for mode in modes:
     directory = root / f'loopback-{mode}'
     directory.mkdir(); (directory/'loopback').mkdir()
@@ -655,11 +657,8 @@ done
         body += f'''trap 'exit {code}' {'INT' if signum == 2 else 'TERM'}
 trap -p INT TERM
 printf '[fixture] ready pid=%s mode=%s\\n' "$$" {mode}
-'''
-        if mode != 'no-delivery': body += f'''
-trap 'primary=$?; stop_loopback || exit 1; wait "$cancel_pid"; exit "$primary"' EXIT
-(sleep 0.2; kill -{signum} "$$") &
-cancel_pid=$!
+printf '%s\\n' "$$" > "$state/fixture-ready.tmp"
+mv "$state/fixture-ready.tmp" "$state/fixture-ready"
 '''
         body += '''
 while true; do sleep 0.1; done
@@ -668,18 +667,41 @@ while true; do sleep 0.1; done
     script.write_text(prefix + setup + body, encoding='utf-8', newline='\n')
     started = time.monotonic()
     result = None
+    delivery = None
     try:
         with (directory/'console.txt').open('w') as console:
             console.write(f'[fixture-driver] inheritedINT={signal.getsignal(signal.SIGINT)!r} inheritedTERM={signal.getsignal(signal.SIGTERM)!r}\n')
             console.flush()
-            result = subprocess.run([sys.executable, '-u', bounded_file.as_posix(), '20', sys.argv[3], script.as_posix()],
-                                    stdout=console, stderr=subprocess.STDOUT,
-                                    env={**os.environ, 'BOUNDED_CLEANUP_FAILED_FILE': str(directory/'command-cleanup-failed')})
+            command = [sys.executable, '-u', bounded_file.as_posix(), '20', sys.argv[3], script.as_posix()]
+            options = dict(stdout=console, stderr=subprocess.STDOUT,
+                           env={**os.environ, 'BOUNDED_CLEANUP_FAILED_FILE': str(directory/'command-cleanup-failed')})
+            if mode in ('SIGINT', 'SIGTERM'):
+                wrapper = subprocess.Popen(command, **options)
+                try:
+                    ready = directory/'fixture-ready'
+                    while wrapper.poll() is None and not ready.exists(): time.sleep(0.02)
+                    assert wrapper.poll() is None and ready.exists(), (mode, 'wrapper exited before readiness')
+                    child_pid = int(ready.read_text())
+                    probes = (directory/'loopback-probes.log').read_text().splitlines()
+                    assert any('phase=readiness ' in row and ' live=1 curlExit=0 http=200 ' in row and row.endswith(' identity=1') for row in probes), (mode, probes)
+                    assert child_pid != wrapper.pid, (mode, 'signal target must be the wrapper')
+                    os.kill(wrapper.pid, signum)
+                    delivery = dict(event='signal-delivered', mode=mode, wrapperPID=wrapper.pid,
+                                    readyChildPID=child_pid, signal=signum, identityReady=True)
+                    (directory/'signal-delivery.json').write_text(json.dumps(delivery) + '\n')
+                    console.write('[fixture-driver] ' + json.dumps(delivery) + '\n'); console.flush()
+                finally:
+                    result = subprocess.CompletedProcess(command, wrapper.wait())
+            else:
+                result = subprocess.run(command, **options)
         console = (directory/'console.txt').read_text()
         expected = 130 if mode == 'SIGINT' else 143 if mode == 'SIGTERM' else 124 if mode == 'no-delivery' else 9 if mode in ('failure', 'diagnostic-failure') else 0
         records = [json.loads(line.split('[bounded] ', 1)[1]) for line in console.splitlines() if line.startswith('[bounded] ')]
         assert result.returncode == expected, (mode, result.returncode, expected)
         assert any(row['event'] == 'primary-exit' and row['exitCode'] == expected for row in records), (mode, records)
+        if mode in ('SIGINT', 'SIGTERM'):
+            assert delivery is not None and delivery['identityReady'], (mode, 'signal delivery absent')
+            assert any(row['event'] == 'primary-exit' and row['reason'] == 'signal' and row['signal'] == signum and row['exitCode'] == expected and row['ownedGroup'] == delivery['readyChildPID'] for row in records), (mode, records)
         assert any(row['event'] == 'cleanup-complete' for row in records), (mode, records)
         assert (directory/'loopback-waited').exists(), (mode, 'owned server not waited')
         assert not (directory/'command-cleanup-failed').exists(), (mode, 'cleanup denied')
