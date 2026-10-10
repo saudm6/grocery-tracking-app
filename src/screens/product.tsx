@@ -2,7 +2,8 @@ import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, Text, View } from 'react-native';
 import { Action, ErrorMessage } from '../components/form';
-import { formatOMR, type ProductDetails } from '../data/grocery';
+import { PurchaseCard } from '../components/purchase-card';
+import { formatOMR, type ProductDetails, type PurchaseRow } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 import { createSubmission } from '../data/submission';
 
@@ -30,13 +31,15 @@ export default function Product() {
   const params = useLocalSearchParams<{ id: string; month?: string }>();
   const productId = Number(params.id);
   const grocery = useGrocery();
-  const [product, setProduct] = useState<ProductDetails | null>(null);
+  const [loaded, setLoaded] = useState<{ product: ProductDetails; purchases: PurchaseRow[] } | null>(null);
+  const product = loaded?.product ?? null;
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const readId = useRef(0);
   const refresh = useCallback(() => {
     const request = ++readId.current;
-    void grocery.getProductDetails(productId).then((details) => { if (readId.current === request) { setProduct(details); setError(''); } })
+    void Promise.all([grocery.getProductDetails(productId), grocery.listProductPurchases(productId)])
+      .then(([product, purchases]) => { if (readId.current === request) { setLoaded({ product, purchases }); setError(''); } })
       .catch((failure: unknown) => { if (readId.current === request) setError(`${failure instanceof Error ? failure.message : 'Could not read this product.'} Retry to see the saved details.`); });
     return () => { readId.current++; };
   }, [grocery, productId]);
@@ -57,7 +60,7 @@ export default function Product() {
         <Action label="Record purchase" disabled={!!error} onPress={() => router.push({ pathname: '/purchase', params: { productId: product.id, ...(params.month === undefined ? {} : { month: params.month }) } })} />
         <Action label="Edit product" disabled={!!error} onPress={() => router.push({ pathname: '/product-edit', params: { id: product.id, ...(params.month === undefined ? {} : { month: params.month }) } })} />
       </>}
-      <ArchiveAction key={`${product.id}:${product.archived}`} product={product} disabled={!!error} onCommitted={(archived) => { setProduct({ ...product, archived }); setNotice(archived ? 'Product archived. Spending, codes, and history are kept.' : 'Product reactivated with its original identity.'); refresh(); }} />
+      <ArchiveAction key={`${product.id}:${product.archived}`} product={product} disabled={!!error} onCommitted={(archived) => { setLoaded((current) => current ? { ...current, product: { ...current.product, archived } } : null); setNotice(archived ? 'Product archived. Spending, codes, and history are kept.' : 'Product reactivated with its original identity.'); refresh(); }} />
       <Text accessibilityRole="header" style={{ fontSize: 22 }}>Product codes</Text>
       {product.codes.length === 0 ? <Text>No codes. You can add a typed code when editing.</Text> : product.codes.map((code) => <View key={code.id} style={{ gap: 6 }}>
         <Text selectable>{code.format ? code.format.toUpperCase().replace('_', '-') : code.namespace === 'qr' ? 'QR' : 'Retail format not recorded'}</Text>
@@ -71,6 +74,8 @@ export default function Product() {
         <Text selectable>Observed store · {observation.store ?? 'Not supplied'}</Text>
         <Text selectable>Recorded · {new Date(observation.recordedAt).toLocaleString()}</Text>
       </View>)}
+      <Text accessibilityRole="header" style={{ fontSize: 22 }}>Actual purchases</Text>
+      {loaded?.purchases.length === 0 ? <Text>No purchases recorded for this product.</Text> : loaded?.purchases.map((purchase) => <PurchaseCard key={purchase.id} purchase={purchase} disabled={!!error} />)}
     </> : null}
   </ScrollView>;
 }
