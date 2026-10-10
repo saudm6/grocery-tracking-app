@@ -3,7 +3,7 @@ import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text } from 'react-native';
 import { Action, ErrorMessage, Field } from '../components/form';
 import { GroupingField } from '../components/grouping-field';
-import { ProductChooser } from '../components/product-chooser';
+import { ProductChooser, type ProductChooserHandle } from '../components/product-chooser';
 import { ReferenceField } from '../components/reference-field';
 import { formatOMR, lineTotal, localDate, parseOMR, parseQuantity, validateMonth, type Grouping, type ProductDetails, type Reference, type References } from '../data/grocery';
 import { useGrocery } from '../data/provider';
@@ -24,6 +24,7 @@ export default function Purchase() {
   const selectedId = selection.kind === 'known' ? selection.id : null;
   const product = selection.kind === 'known' ? selection.details : null;
   const [choosingProduct, setChoosingProduct] = useState(false);
+  const identifier = useRef<ProductChooserHandle | null>(null);
   const [grouping, setGrouping] = useState<Grouping>({ category: { name: '' } });
   const [brand, setBrand] = useState<Reference>({ name: '' });
   const [store, setStore] = useState<Reference>({ name: '' });
@@ -58,12 +59,15 @@ export default function Purchase() {
   }, [grocery, selectedId]);
   useFocusEffect(refresh);
   const submit = useRef(createSubmission(setSaving)).current;
-  const set = (key: keyof typeof draft) => (value: string) => setDraft((previous) => ({ ...previous, [key]: value }));
+  const set = (key: keyof typeof draft) => (value: string) => {
+    if (key === 'name') identifier.current?.cancelIdentification();
+    setDraft((previous) => ({ ...previous, [key]: value }));
+  };
   const chooseProduct = (id: number) => {
     if (id !== selectedId) { readId.current++; setSelection({ kind: 'known', id, details: null }); }
     setChoosingProduct(false);
   };
-  const chooseNew = () => { readId.current++; initializedProduct.current = null; setSelection({ kind: 'new' }); setChoosingProduct(false); };
+  const chooseNew = () => { identifier.current?.cancelIdentification(); readId.current++; initializedProduct.current = null; setSelection({ kind: 'new' }); setChoosingProduct(false); };
   let preview = '';
   try { preview = `${formatOMR(lineTotal(parseQuantity(draft.quantity), parseOMR(draft.price)))} OMR`; } catch {}
   const save = async () => {
@@ -86,11 +90,12 @@ export default function Purchase() {
       {routeError ? <ErrorMessage message={`${routeError} Return and open a purchase from a valid month or product.`} /> : null}
       <Field label="Purchase month (YYYY-MM)" value={draft.month} editable={false} />
       <Action label={choosingProduct ? 'Close saved product choices' : selectedId === null ? 'Choose a saved product' : 'Change selected product'} disabled={saving || !!routeError} onPress={() => setChoosingProduct((open) => !open)} />
-      {choosingProduct ? <><ProductChooser month={draft.month} onChoose={chooseProduct} disabled={saving || !!routeError} /><Text>If there is no saved match, enter a new product in this form. Close these choices to return to your entries.</Text></> : null}
+      <ProductChooser ref={identifier} month={draft.month} onChoose={chooseProduct} disabled={saving || !!routeError} visible={choosingProduct} cameraEnabled />
+      {choosingProduct ? <Text>If there is no saved match, enter a new product in this form. Close these choices to return to your entries.</Text> : null}
       {selectedId === null ? <>
         <Field label="Product name" value={draft.name} onChangeText={set('name')} editable={editing} autoFocus />
-        <ReferenceField label="Brand (optional)" kind="brand" value={brand} onChange={setBrand} rows={references?.brands ?? []} editable={editing} />
-        {references ? <GroupingField value={grouping} references={references} onChange={setGrouping} editable={editing} /> : null}
+        <ReferenceField label="Brand (optional)" kind="brand" value={brand} onChange={(value) => { identifier.current?.cancelIdentification(); setBrand(value); }} rows={references?.brands ?? []} editable={editing} />
+        {references ? <GroupingField value={grouping} references={references} onChange={(value) => { identifier.current?.cancelIdentification(); setGrouping(value); }} editable={editing} /> : null}
       </> : <>
         {product ? <>
           <Text selectable accessibilityRole="header" style={{ fontSize: 22 }}>{product.name} · Product {product.id}{product.archived ? ' · Archived' : ''}</Text>
