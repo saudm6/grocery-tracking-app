@@ -379,7 +379,11 @@ time.sleep(30)
 '''
 for reason, signum, expected in [('SIGINT', signal.SIGINT, 130), ('SIGTERM', signal.SIGTERM, 143), ('deadline', None, 124)]:
     children = []
+    auxiliary = []
     ready = directory / f'{reason}-child.json'
+    command = [sys.executable, '-c', program, str(ready)]
+    namespace = {}
+    original_killpg = getattr(os, 'killpg', None)
     class ObservedChild(original_popen):
         delivered = False
         def __init__(self, *args, **kwargs):
@@ -396,27 +400,48 @@ for reason, signum, expected in [('SIGINT', signal.SIGINT, 130), ('SIGTERM', sig
                 assert self.poll() is None
                 if signum is not None: signal.raise_signal(signum)
             return super().wait(*args, **kwargs)
-    subprocess.Popen = ObservedChild
-    sys.argv = ['bounded', '1' if signum is None else '30', sys.executable, '-c', program, str(ready)]
+    def observe_child(arguments, *args, **kwargs):
+        if arguments == command: return ObservedChild(arguments, *args, **kwargs)
+        auxiliary.append(arguments)
+        return original_popen(arguments, *args, **kwargs)
+    def require_snapshot(pgid, signal_number):
+        if signal_number == 0:
+            assert len(children) == 1 and pgid == children[0].pid and children[0].poll() is not None
+            raise PermissionError('fixture signal-zero requires real process snapshot')
+        return original_killpg(pgid, signal_number)
+    subprocess.Popen = observe_child
+    if os.name == 'posix': os.killpg = require_snapshot
+    sys.argv = ['bounded', '1' if signum is None else '30', *command]
     try:
-        try: exec(compile(body, 'bounded_run', 'exec'), {})
+        fast = subprocess.run([sys.executable, '-c', 'raise SystemExit(0)'], timeout=5, check=True)
+        assert fast.returncode == 0 and not children, 'Fast auxiliary command must bypass readiness and signals'
+        try: exec(compile(body, 'bounded_run', 'exec'), namespace)
         except SystemExit as exit_result: assert exit_result.code == expected, (reason, exit_result.code)
         else: raise AssertionError('Bounded child must exit')
         assert len(children) == 1 and children[0].poll() is not None, 'Owned child must be terminated and reaped'
         if os.name == 'posix':
             try: os.killpg(children[0].pid, 0)
             except ProcessLookupError: pass
+            except PermissionError:
+                assert not namespace['group_members'](strict=True), 'Owned descendant snapshot must be empty'
             else: raise AssertionError('Owned descendant group must be gone')
+            assert ['ps', '-axo', 'pid=,ppid=,pgid=,stat='] in auxiliary, 'Real fast ps must bypass the fixture observer'
+            print(f'{reason}: auxiliary ps forwarded; strict full snapshot proves owned group absent')
+        else: print(f'{reason}: real auxiliary ps/group proof requires hosted POSIX; not claimed on Windows')
         print(f'{reason}: exit={expected}, owned child PID={children[0].pid} terminated and waited; platform={os.name}')
     finally:
         subprocess.Popen, sys.argv = original_popen, original_argv[:]
+        if original_killpg is not None: os.killpg = original_killpg
         for s, handler in original_handlers.items(): signal.signal(s, handler)
         for child in children:
-            if os.name == 'posix':
-                try: os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError: pass
-            elif child.poll() is None: child.kill()
-            child.wait()
+            try:
+                if os.name == 'posix':
+                    try: os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    except PermissionError:
+                        assert child.poll() is not None and not namespace['group_members'](strict=True), 'Cleanup requires reaped child and strict absent-group snapshot'
+                elif child.poll() is None: child.kill()
+            finally: child.wait()
 import json, types
 original_os_module, original_run = sys.modules['os'], subprocess.run
 original_sigkill = getattr(signal, 'SIGKILL', None)
