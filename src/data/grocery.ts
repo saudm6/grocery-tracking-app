@@ -48,7 +48,9 @@ export type ProductCode = { id: number; namespace: 'retail' | 'qr'; original: st
 export type PriceObservation = {
   id: number; price: number; storeId: number | null; store: string | null; source: 'saved_price' | 'receipt';
   effectiveMonth: string; effectiveDate: string | null; recordedAt: string; included: boolean; sourcePurchaseId: number | null; baseline: boolean;
+  previousPrice: number | null; countedChange: number;
 };
+export type LinkedObservation = PriceObservation & { productId: number; product: string };
 export type ProductDetails = ProductSummary & {
   brandId: number | null; categoryId: number | null; category: string; subcategoryId: number | null; subcategory: string | null;
   savedPrice: number | null; savedStoreId: number | null; savedStore: string | null;
@@ -59,11 +61,14 @@ export type PurchaseRow = {
   id: number; productId: number; product: string; brand: string | null; category: string; subcategory: string | null;
   store: string; month: string; purchaseDate: string | null; quantity: number; unitPrice: number; lineTotal: number;
 };
-export type PurchaseDetails = PurchaseRow & { brandId: number | null; categoryId: number | null; subcategoryId: number | null; storeId: number };
+export type PurchaseDetails = PurchaseRow & { brandId: number | null; categoryId: number | null; subcategoryId: number | null; storeId: number; linkedObservation: LinkedObservation | null };
 export type PurchaseCorrection = {
   productId: number; store: Reference; grouping?: Grouping; month: string; purchaseDate?: string | null; quantity: string; unitPrice: string;
 };
 export type MonthReport = { month: string; purchases: PurchaseRow[]; total: number };
+type ApplyOptions = { applyInflation?: boolean };
+type ObservationOwner = { id: number; productId: number; product: string; source: PriceObservation['source'] };
+type Receipt = { id: number; productId: number; storeId: number; month: string; purchaseDate: string | null; unitPrice: number };
 const max = BigInt(Number.MAX_SAFE_INTEGER);
 
 export function parseOMR(text: string): number {
@@ -212,6 +217,34 @@ async function writeSavedPrice(tx: Executor, product: ProductRow, update: SavedP
   await tx.runAsync('INSERT INTO price_history(product_id, price, store_id, source, effective_month, effective_date, recorded_at, included, source_purchase_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     product.id, price, storeId, 'saved_price', effectiveDate.slice(0, 7), effectiveDate, now.toISOString(), earlier && notInflation ? 0 : 1, update.kind === 'purchase' ? update.purchaseId : null);
 }
+async function readPriceHistory(db: Executor, productId: number): Promise<PriceObservation[]> {
+  const rows = await db.getAllAsync<Omit<PriceObservation, 'baseline' | 'included' | 'previousPrice' | 'countedChange'> & { included: number }>(`SELECT h.id, h.price, h.store_id AS storeId, s.name AS store, h.source,
+    h.effective_month AS effectiveMonth, h.effective_date AS effectiveDate, h.recorded_at AS recordedAt, h.included, h.source_purchase_id AS sourcePurchaseId
+    FROM price_history h LEFT JOIN stores s ON s.id = h.store_id WHERE h.product_id = ? ORDER BY h.effective_month, h.effective_date IS NULL, h.effective_date, h.id`, productId);
+  return rows.map((row, position) => ({ ...row, included: row.included === 1, baseline: position === 0,
+    previousPrice: rows[position - 1]?.price ?? null, countedChange: position === 0 || row.included === 0 ? 0 : row.price - rows[position - 1].price }));
+}
+function linkedObservation(db: Executor, purchaseId: number): Promise<ObservationOwner | null> {
+  return db.getFirstAsync<ObservationOwner>(`SELECT h.id, h.product_id AS productId, p.name AS product, h.source
+    FROM price_history h JOIN products p ON p.id = h.product_id WHERE h.source_purchase_id = ?`, purchaseId);
+}
+function receiptSource(observation: ObservationOwner | null) {
+  if (observation?.source === 'saved_price') throw new Error('This purchase already owns a saved-price observation. Change its inflation status instead.');
+}
+async function writeReceiptObservation(tx: Executor, purchase: Receipt, observation: ObservationOwner | null, now: Date) {
+  if (observation) {
+    await tx.runAsync('UPDATE price_history SET product_id = ?, price = ?, store_id = ?, effective_month = ?, effective_date = ? WHERE id = ?',
+      purchase.productId, purchase.unitPrice, purchase.storeId, purchase.month, purchase.purchaseDate, observation.id);
+  } else {
+    if (purchase.month >= localDate(now).slice(0, 7)) throw new Error('Only an older receipt can be applied for the first time.');
+    await tx.runAsync('INSERT INTO price_history(product_id, price, store_id, source, effective_month, effective_date, recorded_at, included, source_purchase_id) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)',
+      purchase.productId, purchase.unitPrice, purchase.storeId, 'receipt', purchase.month, purchase.purchaseDate, now.toISOString(), purchase.id);
+  }
+}
+function applyChoice(options: ApplyOptions): boolean {
+  if (options.applyInflation !== undefined && typeof options.applyInflation !== 'boolean') throw new Error('Choose whether to apply inflation.');
+  return options.applyInflation === true;
+}
 async function clearInvalidPrimaryBrands(tx: Executor) {
   await tx.runAsync(`UPDATE subcategories SET primary_brand_id = NULL WHERE primary_brand_id IS NOT NULL AND NOT EXISTS
     (SELECT 1 FROM products p WHERE p.subcategory_id = subcategories.id AND p.brand_id = subcategories.primary_brand_id AND p.archived = 0)`);
@@ -339,11 +372,9 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       const codeRows = await db.getAllAsync<Omit<ProductCode, 'original' | 'key'> & { original: Uint8Array; key: Uint8Array }>('SELECT id, namespace, CAST(original_code AS BLOB) AS original, scanner_format AS format, CAST(canonical_key AS BLOB) AS key FROM product_codes WHERE product_id = ? ORDER BY id', productId);
       const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
       const codes = codeRows.map((row) => ({ ...row, original: decoder.decode(row.original), key: decoder.decode(row.key) }));
-      const observations = await db.getAllAsync<Omit<PriceObservation, 'baseline' | 'included'> & { included: number }>(`SELECT h.id, h.price, h.store_id AS storeId, s.name AS store, h.source,
-        h.effective_month AS effectiveMonth, h.effective_date AS effectiveDate, h.recorded_at AS recordedAt, h.included, h.source_purchase_id AS sourcePurchaseId
-        FROM price_history h LEFT JOIN stores s ON s.id = h.store_id WHERE h.product_id = ? ORDER BY h.effective_month, h.effective_date IS NULL, h.effective_date, h.id`, productId);
+      const observations = await readPriceHistory(db, productId);
       const saved = observations.filter((row) => row.source === 'saved_price').sort((a, b) => a.id - b.id);
-      return { ...product, archived: product.archived === 1, codes, history: observations.map((row, position) => ({ ...row, included: row.included === 1, baseline: position === 0 })),
+      return { ...product, archived: product.archived === 1, codes, history: observations,
         canExcludeSavedPrice: await hasPredecessor(db, productId, localDate(clock())), priceFirstSet: saved[0]?.recordedAt ?? null, lastSavedPriceChanged: saved.at(-1)?.recordedAt ?? null };
     },
     async setProductArchived(productId: number, archived: boolean): Promise<void> {
@@ -385,16 +416,38 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       return purchaseId;
     },
     async getPurchase(purchaseId: number): Promise<PurchaseDetails> {
-      const purchase = await db.getFirstAsync<Omit<PurchaseDetails, 'lineTotal'>>(`SELECT p.id, p.product_id AS productId, pr.name AS product,
+      const purchase = await db.getFirstAsync<Omit<PurchaseDetails, 'lineTotal' | 'linkedObservation'>>(`SELECT p.id, p.product_id AS productId, pr.name AS product,
         p.brand_id AS brandId, b.name AS brand, p.category_id AS categoryId, c.name AS category, p.subcategory_id AS subcategoryId,
         sub.name AS subcategory, p.store_id AS storeId, s.name AS store, p.month, p.purchase_date AS purchaseDate, p.quantity, p.unit_price AS unitPrice
         FROM purchases p JOIN products pr ON pr.id = p.product_id LEFT JOIN brands b ON b.id = p.brand_id
         JOIN stores s ON s.id = p.store_id LEFT JOIN subcategories sub ON sub.id = p.subcategory_id
         JOIN categories c ON c.id = COALESCE(p.category_id, sub.category_id) WHERE p.id = ?`, id(purchaseId));
       if (!purchase) throw new Error('This purchase no longer exists.');
-      return { ...purchase, lineTotal: lineTotal(purchase.quantity, purchase.unitPrice) };
+      const owner = await linkedObservation(db, purchaseId);
+      const observation = owner ? (await readPriceHistory(db, owner.productId)).find((row) => row.id === owner.id) : null;
+      return { ...purchase, lineTotal: lineTotal(purchase.quantity, purchase.unitPrice), linkedObservation: owner && observation ? { ...observation, productId: owner.productId, product: owner.product } : null };
     },
-    async updatePurchase(purchaseId: number, input: PurchaseCorrection): Promise<void> {
+    async applyReceiptInflation(purchaseId: number): Promise<void> {
+      await exclusive(db, async (tx) => {
+        const purchase = await tx.getFirstAsync<Receipt>('SELECT id, product_id AS productId, store_id AS storeId, month, purchase_date AS purchaseDate, unit_price AS unitPrice FROM purchases WHERE id = ?', id(purchaseId));
+        if (!purchase) throw new Error('This purchase no longer exists.');
+        const observation = await linkedObservation(tx, purchaseId);
+        receiptSource(observation);
+        await writeReceiptObservation(tx, purchase, observation, clock());
+      });
+    },
+    async setPriceChangeInflationStatus(changeId: number, included: boolean): Promise<void> {
+      if (typeof included !== 'boolean') throw new Error('Choose a valid inflation status.');
+      await exclusive(db, async (tx) => {
+        const observation = await tx.getFirstAsync<{ product_id: number }>('SELECT product_id FROM price_history WHERE id = ?', id(changeId));
+        if (!observation) throw new Error('This price observation no longer exists.');
+        const first = await tx.getFirstAsync<{ id: number }>('SELECT id FROM price_history WHERE product_id = ? ORDER BY effective_month, effective_date IS NULL, effective_date, id LIMIT 1', observation.product_id);
+        if (first?.id === changeId) throw new Error('The timeline baseline cannot be excluded or included. Its stored status is kept.');
+        await tx.runAsync('UPDATE price_history SET included = ? WHERE id = ?', included, changeId);
+      });
+    },
+    async updatePurchase(purchaseId: number, input: PurchaseCorrection, options: ApplyOptions = {}): Promise<void> {
+      const apply = applyChoice(options);
       const month = validateMonth(input.month);
       const purchaseDate = validateDate(input.purchaseDate, month);
       const quantity = parseQuantity(input.quantity);
@@ -404,6 +457,8 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
         const purchase = await tx.getFirstAsync<{ product_id: number; brand_id: number | null; category_id: number | null; subcategory_id: number | null; month: string }>(
           'SELECT product_id, brand_id, category_id, subcategory_id, month FROM purchases WHERE id = ?', id(purchaseId));
         if (!purchase) throw new Error('This purchase no longer exists.');
+        const observation = apply ? await linkedObservation(tx, purchaseId) : null;
+        if (apply) receiptSource(observation);
         const productId = id(input.productId);
         let brandId = purchase.brand_id;
         if (productId !== purchase.product_id) {
@@ -417,14 +472,22 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
         const storeId = await reference(tx, 'stores', input.store);
         await tx.runAsync('UPDATE purchases SET product_id = ?, brand_id = ?, store_id = ?, category_id = ?, subcategory_id = ?, month = ?, purchase_date = ?, quantity = ?, unit_price = ? WHERE id = ?',
           productId, brandId, storeId, categoryId, subcategoryId, month, purchaseDate, quantity, price, purchaseId);
+        if (apply) await writeReceiptObservation(tx, { id: purchaseId, productId, storeId, month, purchaseDate, unitPrice: price }, observation, clock());
         await readMonth(tx, purchase.month);
         if (month !== purchase.month) await readMonth(tx, month);
       });
     },
-    async deletePurchase(purchaseId: number): Promise<void> {
+    async deletePurchase(purchaseId: number, options: ApplyOptions = {}): Promise<void> {
+      const apply = applyChoice(options);
       await exclusive(db, async (tx) => {
         const purchase = await tx.getFirstAsync<{ month: string }>('SELECT month FROM purchases WHERE id = ?', id(purchaseId));
         if (!purchase) throw new Error('This purchase no longer exists.');
+        if (apply) {
+          const observation = await linkedObservation(tx, purchaseId);
+          receiptSource(observation);
+          if (!observation) throw new Error('This purchase has no applied receipt observation to remove.');
+          await tx.runAsync('DELETE FROM price_history WHERE id = ?', observation.id);
+        }
         await tx.runAsync('DELETE FROM purchases WHERE id = ?', purchaseId);
         await readMonth(tx, purchase.month);
       });
