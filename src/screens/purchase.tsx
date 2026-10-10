@@ -93,7 +93,7 @@ export default function Purchase() {
       {routeError ? <ErrorMessage message={`${routeError} Return and open a purchase from a valid month or product.`} /> : null}
       <Field label="Purchase month (YYYY-MM)" value={draft.month} editable={false} />
       <Action label={choosingProduct ? 'Close saved product choices' : selectedId === null ? 'Choose a saved product' : 'Change selected product'} disabled={saving || !!routeError} onPress={() => setChoosingProduct((open) => !open)} />
-      <ProductChooser ref={identifier} month={draft.month} onChoose={chooseProduct} disabled={saving || !!routeError} visible={choosingProduct} cameraEnabled />
+      <ProductChooser ref={identifier} month={draft.month} subcategories={references?.subcategories ?? []} onChoose={chooseProduct} disabled={saving || !!routeError} visible={choosingProduct} cameraEnabled />
       {choosingProduct ? <Text>If there is no saved match, enter a new product in this form. Close these choices to return to your entries.</Text> : null}
       {selectedId === null ? <>
         <Field label="Product name" value={draft.name} onChangeText={set('name')} editable={editing} autoFocus />

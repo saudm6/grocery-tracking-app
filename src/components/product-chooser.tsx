@@ -5,7 +5,7 @@ import { ActivityIndicator, AppState, Keyboard, Linking, Platform, Text, View } 
 import { Action, ErrorMessage, Field } from './form';
 import { ProductRow } from './product-row';
 import { cameraCode, type CodeFormat, type CodeInput } from '../data/code';
-import type { ProductSummary } from '../data/grocery';
+import type { ProductSummary, SubcategoryRow } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 
 const formats: { value: CodeFormat; label: string }[] = [
@@ -29,10 +29,12 @@ function SavedProductChoice({ product, month, disabled, onChoose }: {
   </ProductRow>;
 }
 
-export function ProductChooser({ month, onChoose, disabled, visible = true, cameraEnabled = false, ref }: {
-  month: string; onChoose: (id: number) => void; disabled: boolean; visible?: boolean; cameraEnabled?: boolean; ref?: Ref<ProductChooserHandle>;
+export function ProductChooser({ month, subcategories, onChoose, disabled, visible = true, cameraEnabled = false, ref }: {
+  month: string; subcategories: SubcategoryRow[]; onChoose: (id: number) => void; disabled: boolean; visible?: boolean; cameraEnabled?: boolean; ref?: Ref<ProductChooserHandle>;
 }) {
   const grocery = useGrocery();
+  const [subcategoryId, setSubcategoryId] = useState<number | null>(null);
+  const [choosingSubcategory, setChoosingSubcategory] = useState(false);
   const [search, setSearch] = useState('');
   const [includeArchived, setIncludeArchived] = useState(false);
   const [rows, setRows] = useState<ProductSummary[] | null>(null);
@@ -84,10 +86,10 @@ export function ProductChooser({ month, onChoose, disabled, visible = true, came
     if (!visible) return () => {};
     const request = ++listReadId.current;
     setRows(null);
-    void grocery.listProducts(search, includeArchived).then((products) => { if (mounted.current && listReadId.current === request) { setRows(products); setError(''); } })
+    void grocery.listProducts(search, includeArchived, subcategoryId).then((products) => { if (mounted.current && listReadId.current === request) { setRows(products); setError(''); } })
       .catch(() => { if (mounted.current && listReadId.current === request) setError('Could not read saved products. Your entries are kept. Retry.'); });
     return () => { listReadId.current++; };
-  }, [grocery, search, includeArchived, visible]);
+  }, [grocery, search, includeArchived, subcategoryId, visible]);
   useFocusEffect(refresh);
   const resolveCode = useCallback((input: CodeInput, selectOwner = false) => {
     const request = ++lookupReadId.current;
@@ -160,6 +162,11 @@ export function ProductChooser({ month, onChoose, disabled, visible = true, came
       if (mounted.current && captureRef.current.generation === generation) changeCapture({ status: 'error', generation, message: 'Could not open Settings. Enable camera permission in the app settings, or use manual search and code entry.' });
     });
   };
+  const selectedSubcategory = subcategories.find((row) => row.id === subcategoryId);
+  const chooseSubcategory = (id: number | null) => {
+    if (id !== subcategoryId) { listReadId.current++; setRows(null); setSubcategoryId(id); }
+    setChoosingSubcategory(false);
+  };
   return <View style={visible ? { gap: 16 } : { display: 'none' }} accessibilityElementsHidden={!visible} importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}>
     {cameraEnabled ? <>
       <Text accessibilityRole="header" style={{ fontSize: 22 }}>Scan a product code</Text>
@@ -173,6 +180,14 @@ export function ProductChooser({ month, onChoose, disabled, visible = true, came
       }} /> : null}
       {capture.status === 'preview' ? <><Text>Point the back camera at a UPC, EAN or QR label. If it is unreadable, close the camera and type the code or search by name.</Text><Action label="Close camera" disabled={disabled} onPress={clearLookup} /></> : null}
     </> : null}
+    <Text selectable>Manual subcategory · {subcategoryId === null ? 'All saved products' : selectedSubcategory ? `${selectedSubcategory.category} / ${selectedSubcategory.name}` : `Saved subcategory ${subcategoryId} unavailable`}</Text>
+    <Action label={choosingSubcategory ? 'Close manual subcategory choices' : 'Choose manual subcategory'} disabled={disabled} onPress={() => setChoosingSubcategory((open) => !open)} />
+    {choosingSubcategory ? <>
+      <Action label="Use all saved products" disabled={disabled} onPress={() => chooseSubcategory(null)} />
+      {subcategories.map((row) => <Action key={row.id} label={`Use products from ${row.category} / ${row.name}`} disabled={disabled} onPress={() => chooseSubcategory(row.id)} />)}
+    </> : null}
+    {subcategoryId !== null && !selectedSubcategory ? <ErrorMessage message="This saved subcategory is unavailable. Retry purchase choices or choose another manual context." /> : null}
+    <Text>A subcategory&apos;s current primary brand comes first in manual choices. Choose the exact product. Changing these choices keeps your selected product and purchase entries.</Text>
     <Field label="Search saved product names" value={search} onChangeText={(value) => { clearLookup(); listReadId.current++; setRows(null); setSearch(value); }} editable={!disabled} autoCorrect={false} returnKeyType="search" />
     <Action label={includeArchived ? 'Hide archived products' : 'Show archived products'} disabled={disabled} onPress={() => { clearLookup(); listReadId.current++; setRows(null); setIncludeArchived((shown) => !shown); }} />
     {error ? <><ErrorMessage message={error} /><Action label="Retry saved products" disabled={disabled} onPress={refresh} /></> : rows === null ? <ActivityIndicator accessibilityLabel="Loading saved products" /> : null}
