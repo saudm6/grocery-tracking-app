@@ -58,14 +58,21 @@ export type ProductDetails = ProductSummary & {
   priceFirstSet: string | null; lastSavedPriceChanged: string | null;
 };
 export type PurchaseRow = {
-  id: number; productId: number; product: string; brand: string | null; category: string; subcategory: string | null;
-  store: string; month: string; purchaseDate: string | null; quantity: number; unitPrice: number; lineTotal: number;
+  id: number; productId: number; product: string; brandId: number | null; brand: string | null;
+  categoryId: number | null; resolvedCategoryId: number; category: string; subcategoryId: number | null; subcategory: string | null;
+  storeId: number; store: string; month: string; purchaseDate: string | null; quantity: number; unitPrice: number; lineTotal: number;
 };
-export type PurchaseDetails = PurchaseRow & { brandId: number | null; categoryId: number | null; subcategoryId: number | null; storeId: number; linkedObservation: LinkedObservation | null };
+export type PurchaseDetails = PurchaseRow & { linkedObservation: LinkedObservation | null };
 export type PurchaseCorrection = {
   productId: number; store: Reference; grouping?: Grouping; month: string; purchaseDate?: string | null; quantity: string; unitPrice: string;
 };
 export type MonthReport = { month: string; purchases: PurchaseRow[]; total: number };
+type SpendingGroup = { id: number; name: string; total: number };
+export type HomeAnalytics = {
+  month: string; total: number; purchaseCount: number; previousMonth: string | null; previousTotal: number | null;
+  difference: number | null; percentChange: number | null; categories: SpendingGroup[]; stores: SpendingGroup[];
+  subcategories: (SpendingGroup & { categoryId: number; category: string })[];
+};
 type ApplyOptions = { applyInflation?: boolean };
 type ObservationOwner = { id: number; productId: number; product: string; source: PriceObservation['source'] };
 type Receipt = { id: number; productId: number; storeId: number; month: string; purchaseDate: string | null; unitPrice: number };
@@ -249,20 +256,28 @@ async function clearInvalidPrimaryBrands(tx: Executor) {
   await tx.runAsync(`UPDATE subcategories SET primary_brand_id = NULL WHERE primary_brand_id IS NOT NULL AND NOT EXISTS
     (SELECT 1 FROM products p WHERE p.subcategory_id = subcategories.id AND p.brand_id = subcategories.primary_brand_id AND p.archived = 0)`);
 }
-async function readPurchases(db: Executor, column: 'month' | 'product_id', value: string | number): Promise<PurchaseRow[]> {
-  const entries = await db.getAllAsync<Omit<PurchaseRow, 'lineTotal'>>(`SELECT p.id, p.product_id AS productId, pr.name AS product, b.name AS brand,
-    c.name AS category, sub.name AS subcategory, s.name AS store, p.month, p.purchase_date AS purchaseDate, p.quantity, p.unit_price AS unitPrice
+async function readPurchases(db: Executor, column: 'month' | 'product_id', value: string | number, previousMonth: string | null): Promise<PurchaseRow[]> {
+  const entries = await db.getAllAsync<Omit<PurchaseRow, 'lineTotal'>>(`SELECT p.id, p.product_id AS productId, pr.name AS product, p.brand_id AS brandId, b.name AS brand,
+    p.category_id AS categoryId, c.id AS resolvedCategoryId, c.name AS category, p.subcategory_id AS subcategoryId, sub.name AS subcategory,
+    p.store_id AS storeId, s.name AS store, p.month, p.purchase_date AS purchaseDate, p.quantity, p.unit_price AS unitPrice
     FROM purchases p JOIN products pr ON pr.id = p.product_id LEFT JOIN brands b ON b.id = p.brand_id
     JOIN stores s ON s.id = p.store_id LEFT JOIN subcategories sub ON sub.id = p.subcategory_id
-    JOIN categories c ON c.id = COALESCE(p.category_id, sub.category_id) WHERE p.${column} = ? ORDER BY p.id DESC`, value);
+    JOIN categories c ON c.id = COALESCE(p.category_id, sub.category_id) WHERE p.${column} IN (?, ?) ORDER BY p.id DESC`, value, previousMonth);
   return entries.map((entry) => ({ ...entry, lineTotal: lineTotal(entry.quantity, entry.unitPrice) }));
 }
-async function readMonth(db: Executor, month: string): Promise<MonthReport> {
-  const purchases = await readPurchases(db, 'month', month);
+function monthTotal(purchases: PurchaseRow[]): number {
   let total = 0n;
   for (const purchase of purchases) total += BigInt(purchase.lineTotal);
   if (total > max) throw new Error('The month total exceeds the safe amount limit.');
-  return { month, purchases, total: Number(total) };
+  return Number(total);
+}
+async function readMonth(db: Executor, month: string): Promise<MonthReport> {
+  const purchases = await readPurchases(db, 'month', month, null);
+  return { month, purchases, total: monthTotal(purchases) };
+}
+function rankSpending<T extends { id: number; name: string; total: bigint }>(groups: Map<number, T>) {
+  return [...groups.values()].map(({ total, ...group }) => ({ ...group, total: Number(total) }))
+    .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name) || a.id - b.id);
 }
 export function createGrocery(db: Database, clock: () => Date = () => new Date()) {
   const saveReference = async (table: ReferenceTable, input: ReferenceChange): Promise<number> => {
@@ -417,7 +432,7 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
     },
     async getPurchase(purchaseId: number): Promise<PurchaseDetails> {
       const purchase = await db.getFirstAsync<Omit<PurchaseDetails, 'lineTotal' | 'linkedObservation'>>(`SELECT p.id, p.product_id AS productId, pr.name AS product,
-        p.brand_id AS brandId, b.name AS brand, p.category_id AS categoryId, c.name AS category, p.subcategory_id AS subcategoryId,
+        p.brand_id AS brandId, b.name AS brand, p.category_id AS categoryId, c.id AS resolvedCategoryId, c.name AS category, p.subcategory_id AS subcategoryId,
         sub.name AS subcategory, p.store_id AS storeId, s.name AS store, p.month, p.purchase_date AS purchaseDate, p.quantity, p.unit_price AS unitPrice
         FROM purchases p JOIN products pr ON pr.id = p.product_id LEFT JOIN brands b ON b.id = p.brand_id
         JOIN stores s ON s.id = p.store_id LEFT JOIN subcategories sub ON sub.id = p.subcategory_id
@@ -493,7 +508,38 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       });
     },
     getMonth(month: string) { return readMonth(db, validateMonth(month)); },
-    async listProductPurchases(productId: number): Promise<PurchaseRow[]> { return readPurchases(db, 'product_id', id(productId)); },
+    async getHomeAnalytics(month: string): Promise<HomeAnalytics> {
+      validateMonth(month);
+      const [year, monthNumber] = month.split('-').map(Number);
+      const previousMonth = year === 1 && monthNumber === 1 ? null
+        : `${String(monthNumber === 1 ? year - 1 : year).padStart(4, '0')}-${String(monthNumber === 1 ? 12 : monthNumber - 1).padStart(2, '0')}`;
+      const entries = await readPurchases(db, 'month', month, previousMonth);
+      const purchases = entries.filter((purchase) => purchase.month === month);
+      const total = monthTotal(purchases);
+      const previousTotal = previousMonth === null ? null : monthTotal(entries.filter((purchase) => purchase.month === previousMonth));
+      const categories = new Map<number, { id: number; name: string; total: bigint }>();
+      const subcategories = new Map<number, { id: number; name: string; categoryId: number; category: string; total: bigint }>();
+      const stores = new Map<number, { id: number; name: string; total: bigint }>();
+      for (const purchase of purchases) {
+        const amount = BigInt(purchase.lineTotal);
+        const category = categories.get(purchase.resolvedCategoryId) ?? { id: purchase.resolvedCategoryId, name: purchase.category, total: 0n };
+        category.total += amount;
+        categories.set(category.id, category);
+        if (purchase.subcategoryId !== null) {
+          const child = subcategories.get(purchase.subcategoryId) ?? { id: purchase.subcategoryId, name: purchase.subcategory!, categoryId: purchase.resolvedCategoryId, category: purchase.category, total: 0n };
+          child.total += amount;
+          subcategories.set(child.id, child);
+        }
+        const store = stores.get(purchase.storeId) ?? { id: purchase.storeId, name: purchase.store, total: 0n };
+        store.total += amount;
+        stores.set(store.id, store);
+      }
+      return { month, total, purchaseCount: purchases.length, previousMonth, previousTotal,
+        difference: previousTotal === null ? null : total - previousTotal,
+        percentChange: previousTotal !== null && previousTotal > 0 ? (total - previousTotal) / previousTotal * 100 : null,
+        categories: rankSpending(categories), subcategories: rankSpending(subcategories), stores: rankSpending(stores) };
+    },
+    async listProductPurchases(productId: number): Promise<PurchaseRow[]> { return readPurchases(db, 'product_id', id(productId), null); },
     async listReferences(): Promise<References> {
       const [brands, categories, stores, subcategories] = await Promise.all([
         db.getAllAsync<ReferenceRow>('SELECT id, name, name_key AS nameKey FROM brands ORDER BY name_key'),
