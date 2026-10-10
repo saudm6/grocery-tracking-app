@@ -216,18 +216,18 @@ async function clearInvalidPrimaryBrands(tx: Executor) {
   await tx.runAsync(`UPDATE subcategories SET primary_brand_id = NULL WHERE primary_brand_id IS NOT NULL AND NOT EXISTS
     (SELECT 1 FROM products p WHERE p.subcategory_id = subcategories.id AND p.brand_id = subcategories.primary_brand_id AND p.archived = 0)`);
 }
-async function readMonth(db: Executor, month: string): Promise<MonthReport> {
+async function readPurchases(db: Executor, column: 'month' | 'product_id', value: string | number): Promise<PurchaseRow[]> {
   const entries = await db.getAllAsync<Omit<PurchaseRow, 'lineTotal'>>(`SELECT p.id, p.product_id AS productId, pr.name AS product, b.name AS brand,
     c.name AS category, sub.name AS subcategory, s.name AS store, p.month, p.purchase_date AS purchaseDate, p.quantity, p.unit_price AS unitPrice
     FROM purchases p JOIN products pr ON pr.id = p.product_id LEFT JOIN brands b ON b.id = p.brand_id
     JOIN stores s ON s.id = p.store_id LEFT JOIN subcategories sub ON sub.id = p.subcategory_id
-    JOIN categories c ON c.id = COALESCE(p.category_id, sub.category_id) WHERE p.month = ? ORDER BY p.id DESC`, month);
+    JOIN categories c ON c.id = COALESCE(p.category_id, sub.category_id) WHERE p.${column} = ? ORDER BY p.id DESC`, value);
+  return entries.map((entry) => ({ ...entry, lineTotal: lineTotal(entry.quantity, entry.unitPrice) }));
+}
+async function readMonth(db: Executor, month: string): Promise<MonthReport> {
+  const purchases = await readPurchases(db, 'month', month);
   let total = 0n;
-  const purchases = entries.map((entry) => {
-    const amount = lineTotal(entry.quantity, entry.unitPrice);
-    total += BigInt(amount);
-    return { ...entry, lineTotal: amount };
-  });
+  for (const purchase of purchases) total += BigInt(purchase.lineTotal);
   if (total > max) throw new Error('The month total exceeds the safe amount limit.');
   return { month, purchases, total: Number(total) };
 }
@@ -430,6 +430,7 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       });
     },
     getMonth(month: string) { return readMonth(db, validateMonth(month)); },
+    async listProductPurchases(productId: number): Promise<PurchaseRow[]> { return readPurchases(db, 'product_id', id(productId)); },
     async listReferences(): Promise<References> {
       const [brands, categories, stores, subcategories] = await Promise.all([
         db.getAllAsync<ReferenceRow>('SELECT id, name, name_key AS nameKey FROM brands ORDER BY name_key'),
