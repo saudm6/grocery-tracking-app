@@ -886,13 +886,6 @@ udid="$(xcrun simctl create grocery-ios-proof com.apple.CoreSimulator.SimDeviceT
 printf '%s\n' "$udid" > "$evidence/simulator-udid.txt"
 xcrun simctl boot "$udid"
 run_stage simulator-boot 600 xcrun simctl bootstatus "$udid" -b
-if run_stage driver-warmup 600 maestro --verbose --platform ios --device "$udid" hierarchy --no-reinstall-driver; then
-  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
-else
-  driver_result=$?
-  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
-  exit "$driver_result"
-fi
 active_stage=loopback-readiness
 start_loopback 9187 30
 build_args=(-workspace "$workspace" -scheme "$scheme" -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=$udid" -derivedDataPath "$RUNNER_TEMP/grocery-ios-derived" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO ONLY_ACTIVE_ARCH=YES COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES)
@@ -932,6 +925,13 @@ xcrun simctl install "$udid" "$app"
 installed="$(xcrun simctl get_app_container "$udid" com.saudm6.grocerytracker app)"
 cmp "$app/main.jsbundle" "$installed/main.jsbundle"
 
+if run_stage driver-warmup 600 maestro --verbose --platform ios --device "$udid" hierarchy --no-reinstall-driver; then
+  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
+else
+  driver_result=$?
+  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
+  exit "$driver_result"
+fi
 active_stage=before-offline
 probe before online
 if curl --noproxy '*' --silent --head --connect-timeout 2 --max-time 5 'http://[2606:4700:4700::1111]' > "$state/before-ipv6.txt" 2>&1; then
