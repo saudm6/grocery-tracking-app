@@ -4,10 +4,10 @@ name: Offline manual purchase and persistent restart
 - launchApp:
     clearState: false
 - assertVisible: Home
-- assertVisible: Total Spending
-- assertVisible: Inflation
-- assertVisible: Catalog
-- tapOn: Total Spending
+- assertVisible: 'Total Spending, tab, 2 of 4'
+- assertVisible: 'Inflation, tab, 3 of 4'
+- assertVisible: 'Catalog, tab, 4 of 4'
+- tapOn: 'Total Spending, tab, 2 of 4'
 - assertVisible: No purchases in this month.*
 - tapOn: Add purchase
 - tapOn:
@@ -86,7 +86,7 @@ name: Offline manual purchase and persistent restart
 - stopApp
 - launchApp:
     clearState: false
-- tapOn: Total Spending
+- tapOn: 'Total Spending, tab, 2 of 4'
 - assertVisible: '${MONTH} total.*0.003 OMR'
 - assertVisible: IOSSmokeMilk
 - assertVisible: 3 items.*0.001 OMR each
