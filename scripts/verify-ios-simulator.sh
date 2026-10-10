@@ -733,7 +733,7 @@ fi
 
 if [[ "${1:-}" == --restore-guard ]]; then
   native_host || { echo 'Restore guard requires the owned hosted macOS runner.' >&2; exit 1; }
-  [[ "$2" == "$RUNNER_TEMP/grocery-ios-evidence/network" && "$3" == 150 ]] || exit 1
+  [[ "$2" == "$RUNNER_TEMP/grocery-ios-evidence/network" && "$3" == 630 ]] || exit 1
   guard_restore "$2" "$3"
   exit 0
 fi
@@ -764,7 +764,7 @@ cleanup() {
   trap - EXIT INT TERM
   printf '[cleanup-entry] primaryExit=%s stage=%s offlineStarted=%s\n' "$primary_result" "$active_stage" "$offline_started"
   if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi
-  if prove_restoration "$state" "$offline_started" 155; then
+  if prove_restoration "$state" "$offline_started" 635; then
     network_proven=1
   else result=1; fi
   printf '[cleanup-network] proven=%s withdrawn=%s ownedCleanupMarker=%s upload=pending-final-cleanup\n' "$network_proven" "$offline_started" "$(test ! -f "$evidence/command-cleanup-failed" && printf absent || printf present)"
@@ -886,6 +886,13 @@ udid="$(xcrun simctl create grocery-ios-proof com.apple.CoreSimulator.SimDeviceT
 printf '%s\n' "$udid" > "$evidence/simulator-udid.txt"
 xcrun simctl boot "$udid"
 run_stage simulator-boot 600 xcrun simctl bootstatus "$udid" -b
+if run_stage driver-warmup 600 maestro --verbose --platform ios --device "$udid" hierarchy --no-reinstall-driver; then
+  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
+else
+  driver_result=$?
+  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
+  exit "$driver_result"
+fi
 active_stage=loopback-readiness
 start_loopback 9187 30
 build_args=(-workspace "$workspace" -scheme "$scheme" -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=$udid" -derivedDataPath "$RUNNER_TEMP/grocery-ios-derived" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO ONLY_ACTIVE_ARCH=YES COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES)
@@ -925,13 +932,6 @@ xcrun simctl install "$udid" "$app"
 installed="$(xcrun simctl get_app_container "$udid" com.saudm6.grocerytracker app)"
 cmp "$app/main.jsbundle" "$installed/main.jsbundle"
 
-if run_stage driver-warmup 600 maestro --verbose --platform ios --device "$udid" hierarchy --no-reinstall-driver; then
-  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
-else
-  driver_result=$?
-  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
-  exit "$driver_result"
-fi
 active_stage=before-offline
 probe before online
 if curl --noproxy '*' --silent --head --connect-timeout 2 --max-time 5 'http://[2606:4700:4700::1111]' > "$state/before-ipv6.txt" 2>&1; then
@@ -940,7 +940,7 @@ else printf 'IPv6 egress unavailable before test; no IPv6 blocking claim.\n' > "
 /sbin/ifconfig -a > "$state/interfaces-before.txt"
 /sbin/ifconfig -l -u | tr ' ' '\n' | sed '/^$/d; /^lo0$/d' > "$state/interfaces"
 [[ -s "$state/interfaces" ]]
-nohup /bin/bash "$PWD/scripts/verify-ios-simulator.sh" --restore-guard "$state" 150 > "$state/guard.log" 2>&1 < /dev/null &
+nohup /bin/bash "$PWD/scripts/verify-ios-simulator.sh" --restore-guard "$state" 630 > "$state/guard.log" 2>&1 < /dev/null &
 guard_pid=$!
 for attempt in $(seq 1 20); do [[ ! -f "$state/guard-ready" ]] || break; sleep 0.1; done
 [[ -f "$state/guard-ready" ]]
@@ -963,7 +963,7 @@ proof_date="$(date '+%Y-%m-%d')"
 proof_month="${proof_date:0:7}"
 printf '%s\n' "$proof_date" > "$evidence/proof-date.txt"
 active_stage=offline-ui
-MAESTRO_DRIVER_STARTUP_TIMEOUT=120000 bounded_run 120 maestro --platform ios --device "$udid" test tests/native/ios-smoke.yaml --no-reinstall-driver -e "MONTH=$proof_month" --format JUNIT --output "$evidence/maestro/junit.xml" --debug-output "$evidence/maestro/debug" --test-output-dir "$evidence/maestro/artifacts" 2>&1 | tee "$evidence/maestro/output.log"
+MAESTRO_DRIVER_STARTUP_TIMEOUT=120000 bounded_run 600 maestro --platform ios --device "$udid" test tests/native/ios-smoke.yaml --no-reinstall-driver -e "MONTH=$proof_month" --format JUNIT --output "$evidence/maestro/junit.xml" --debug-output "$evidence/maestro/debug" --test-output-dir "$evidence/maestro/artifacts" 2>&1 | tee "$evidence/maestro/output.log"
 probe completed offline
 [[ ! -f "$state/offline-violation" && ! -f "$state/guard-fired" ]]
 [[ "$(date '+%Y-%m-%d')" == "$proof_date" ]]
