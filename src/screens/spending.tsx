@@ -39,6 +39,7 @@ export default function Spending() {
         <Text selectable>{purchase.quantity} items × {formatOMR(purchase.unitPrice)} OMR each</Text>
         <Text selectable style={{ fontSize: 18, fontVariant: ['tabular-nums'] }}>Line total · {formatOMR(purchase.lineTotal)} OMR</Text>
         <Text selectable>{purchase.purchaseDate ?? 'Exact purchase date not supplied'}</Text>
+        <Action label={`Correct or delete ${purchase.product} · Purchase ${purchase.id}`} onPress={() => router.push({ pathname: '/purchase/[id]', params: { id: purchase.id } })} />
       </View>)}
     </>}
   </ScrollView>;

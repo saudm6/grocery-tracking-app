@@ -6,7 +6,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import type { SQLiteBindValue } from 'expo-sqlite';
 import { normalizeCode, type CodeInput } from './code';
-import { createGrocery, formatOMR, initializeDatabase, lineTotal, parseOMR, parseQuantity, referenceNameKey, validateDate, validateMonth, type Database, type Executor, type Grouping, type ProductInput, type PurchaseInput } from './grocery';
+import { createGrocery, formatOMR, initializeDatabase, lineTotal, parseOMR, parseQuantity, referenceNameKey, validateDate, validateMonth, type Database, type Executor, type Grouping, type ProductInput, type PurchaseCorrection, type PurchaseInput } from './grocery';
 import { migrations } from './schema';
 import { createSubmission } from './submission';
 
@@ -359,6 +359,200 @@ async function storedState(db: Executor) {
   }
   return state;
 }
+
+async function correctionFixture() {
+  const f = await fixture();
+  for (const [table, names] of [['brands', ['Mazoon', 'Marai']], ['categories', ['Dairy', 'Other']], ['stores', ['Local store', 'Catalog store']]] as const) {
+    for (const label of names) await f.db.runAsync(`INSERT INTO ${table}(name, name_key) VALUES (?, ?)`, label, referenceNameKey(label));
+  }
+  for (const label of ['Milk', 'Yogurt']) await f.db.runAsync('INSERT INTO subcategories(category_id, name, name_key) VALUES (?, ?, ?)', 1, label, referenceNameKey(label));
+  await f.db.runAsync('INSERT INTO products(id, name, brand_id, subcategory_id, saved_price, saved_store_id) VALUES (?, ?, ?, ?, ?, ?)', 1, 'Milk product', 2, 2, 2500, 2);
+  await f.db.runAsync('INSERT INTO products(id, name, brand_id, category_id, saved_price, saved_store_id) VALUES (?, ?, ?, ?, ?, ?)', 2, 'Replacement', 2, 2, 3000, 2);
+  for (const [purchaseId, storeId, month, date, quantity, price, timestamp] of [
+    [1, 1, '2026-09', '2026-09-05', 2, 2000, '2026-09-06T10:00:00.000Z'],
+    [2, 2, '2026-10', '2026-10-09', 1, 2500, '2026-10-09T10:00:00.000Z'],
+  ] as const) await f.db.runAsync('INSERT INTO purchases(id, product_id, brand_id, store_id, subcategory_id, month, purchase_date, quantity, unit_price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    purchaseId, 1, 1, storeId, 1, month, date, quantity, price, timestamp);
+  for (const [historyId, price, storeId, source, month, date, timestamp, included, purchaseId] of [
+    [11, 2000, 1, 'receipt', '2026-09', '2026-09-05', '2026-10-01T10:00:00.000Z', 0, 1],
+    [12, 2500, 2, 'saved_price', '2026-10', '2026-10-09', '2026-10-09T10:00:00.000Z', 1, 2],
+  ] as const) await f.db.runAsync('INSERT INTO price_history(id, product_id, price, store_id, source, effective_month, effective_date, recorded_at, included, source_purchase_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    historyId, 1, price, storeId, source, month, date, timestamp, included, purchaseId);
+  for (const [codeId, productId, code] of [[7, 1, { format: 'upc_e', value: '01234558' }], [8, 1, { format: 'qr', value: 'Milk\0Tail' }], [9, 2, { format: 'qr', value: '\ufeffReplacement' }]] as const) {
+    const normalized = normalizeCode(code);
+    await f.db.runAsync('INSERT INTO product_codes(id, product_id, namespace, original_code, scanner_format, canonical_key) VALUES (?, ?, ?, CAST(? AS TEXT), ?, CAST(? AS TEXT))',
+      codeId, productId, normalized.namespace, new TextEncoder().encode(normalized.original), normalized.format, new TextEncoder().encode(normalized.key));
+  }
+  return f;
+}
+const correction = (changes: Partial<PurchaseCorrection> = {}): PurchaseCorrection => ({ productId: 1, store: { id: 1 }, month: '2026-09', purchaseDate: '2026-09-05', quantity: '2', unitPrice: '2.000', ...changes });
+const codeBytes = (db: Executor) => db.getAllAsync('SELECT id, product_id, namespace, scanner_format, hex(original_code) AS original, hex(canonical_key) AS canonical FROM product_codes ORDER BY id');
+
+test('ordinary corrections preserve recorded identity, defaults and all history; deletions detach either source across reopening', async () => {
+  const f = await correctionFixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    const original = { id: 1, productId: 1, product: 'Milk product', brandId: 1, brand: 'Mazoon', categoryId: null, category: 'Dairy', subcategoryId: 1, subcategory: 'Milk', storeId: 1, store: 'Local store', month: '2026-09', purchaseDate: '2026-09-05', quantity: 2, unitPrice: 2000, lineTotal: 4000 };
+    assert.deepEqual(await grocery.getPurchase(1), original);
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [4000, 2500]);
+    const before = await storedState(f.db);
+    const bytes = await codeBytes(f.db);
+    assert.deepEqual(bytes, [
+      { id: 7, product_id: 1, namespace: 'retail', scanner_format: 'upc_e', original: '3031323334353538', canonical: '3030303132333435303030303538' },
+      { id: 8, product_id: 1, namespace: 'qr', scanner_format: 'qr', original: '4D696C6B005461696C', canonical: '4D696C6B005461696C' },
+      { id: 9, product_id: 2, namespace: 'qr', scanner_format: 'qr', original: 'EFBBBF5265706C6163656D656E74', canonical: 'EFBBBF5265706C6163656D656E74' },
+    ]);
+    await grocery.updatePurchase(1, correction({ quantity: '3' }));
+    assert.deepEqual(await grocery.getPurchase(1), { ...original, quantity: 3, lineTotal: 6000 });
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [6000, 2500]);
+    await grocery.updatePurchase(1, correction({ productId: 2, grouping: { category: { id: 2 } }, month: '2026-10', purchaseDate: '2026-10-07', quantity: '1', unitPrice: '1.500' }));
+    assert.deepEqual(await grocery.getPurchase(1), { ...original, productId: 2, product: 'Replacement', brandId: 2, brand: 'Marai', categoryId: 2, category: 'Other', subcategoryId: null, subcategory: null, month: '2026-10', purchaseDate: '2026-10-07', quantity: 1, unitPrice: 1500, lineTotal: 1500 });
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [0, 4000]);
+    const changed = await storedState(f.db);
+    for (const table of ['brands', 'categories', 'subcategories', 'stores', 'products', 'product_codes', 'price_history']) assert.deepEqual(changed[table], before[table], table);
+    assert.deepEqual(await f.db.getFirstAsync('SELECT id, created_at FROM purchases WHERE id = 1'), { id: 1, created_at: '2026-09-06T10:00:00.000Z' });
+    await grocery.deletePurchase(1);
+    assert.equal((await grocery.getMonth('2026-10')).total, 2500);
+    const history = before.price_history as { source_purchase_id: number | null }[];
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM price_history ORDER BY id'), history.map((row) => row.source_purchase_id === 1 ? { ...row, source_purchase_id: null } : row));
+    await grocery.deletePurchase(2);
+    assert.equal((await grocery.getMonth('2026-10')).total, 0);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM price_history ORDER BY id'), history.map((row) => ({ ...row, source_purchase_id: null })));
+    const reopened = open(f.path);
+    try {
+      const saved = createGrocery(reopened.db, now);
+      assert.deepEqual([(await saved.getMonth('2026-09')).total, (await saved.getMonth('2026-10')).total], [0, 0]);
+      assert.deepEqual((await saved.getProductDetails(1)).history.map((row) => ({ id: row.id, price: row.price, store: row.storeId, source: row.source, month: row.effectiveMonth, date: row.effectiveDate, included: row.included, purchase: row.sourcePurchaseId })), [
+        { id: 11, price: 2000, store: 1, source: 'receipt', month: '2026-09', date: '2026-09-05', included: false, purchase: null },
+        { id: 12, price: 2500, store: 2, source: 'saved_price', month: '2026-10', date: '2026-10-09', included: true, purchase: null },
+      ]);
+      assert.deepEqual(await reopened.db.getAllAsync('SELECT * FROM products ORDER BY id'), before.products);
+      assert.deepEqual(await codeBytes(reopened.db), bytes);
+      assert.deepEqual(await reopened.db.getAllAsync('PRAGMA foreign_key_check'), []);
+      assert.deepEqual(await reopened.db.getFirstAsync('PRAGMA integrity_check'), { integrity_check: 'ok' });
+    } finally { reopened.close(); }
+  } finally { f.cleanup(); }
+});
+
+test('correction validates paid fields and references, permits an archived original, and initializes active replacement brand at commit', async () => {
+  const f = await correctionFixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    const before = await storedState(f.db);
+    const bytes = await codeBytes(f.db);
+    for (const changes of [
+      { month: '2026-13' }, { purchaseDate: '2026-10-01' }, { purchaseDate: '2026-09-31' }, { quantity: '0' }, { quantity: '1.5' },
+      { unitPrice: '-1' }, { unitPrice: '1.0001' }, { quantity: '2', unitPrice: '9007199254740.991' },
+      { productId: 0 }, { productId: 999 }, { productId: 2 }, { store: { id: 999 } },
+      { grouping: { subcategory: { id: 999 } } }, { grouping: {} as Grouping },
+      { grouping: { category: { id: 1 }, subcategory: { id: 1 } } as unknown as Grouping },
+      { grouping: { subcategory: { name: 'Milk', parentCategory: { id: 1 } } } },
+      { grouping: { category: { name: 'Rollback category' } }, store: { name: ' LOCAL STORE ' } },
+      { grouping: { category: { name: 'Bad\0category' } } },
+    ] as Partial<PurchaseCorrection>[]) {
+      await assert.rejects(grocery.updatePurchase(1, correction(changes)));
+      assert.deepEqual(await storedState(f.db), before);
+    }
+    for (const purchaseId of [0, 999, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      await assert.rejects(grocery.getPurchase(purchaseId));
+      await assert.rejects(grocery.updatePurchase(purchaseId, correction()));
+      await assert.rejects(grocery.deletePurchase(purchaseId));
+    }
+    await grocery.setProductArchived(2, true);
+    const archived = await storedState(f.db);
+    await assert.rejects(grocery.updatePurchase(1, correction({ productId: 2, grouping: { category: { id: 2 } }, store: { name: 'Must not remain' } })), /active replacement/);
+    assert.deepEqual(await storedState(f.db), archived);
+    await grocery.setProductArchived(1, true);
+    await grocery.updatePurchase(1, correction({ quantity: '4', unitPrice: '0', purchaseDate: null }));
+    assert.deepEqual({ brand: (await grocery.getPurchase(1)).brandId, child: (await grocery.getPurchase(1)).subcategoryId, total: (await grocery.getMonth('2026-09')).total }, { brand: 1, child: 1, total: 0 });
+    await grocery.updatePurchase(1, correction({ quantity: '4', unitPrice: '0', purchaseDate: '', store: { name: 'Corrected store' }, grouping: { subcategory: { name: 'Corrected group', parentCategory: { name: 'Corrected parent' } } } }));
+    assert.deepEqual({ brand: (await grocery.getPurchase(1)).brandId, category: (await grocery.getPurchase(1)).categoryId, child: (await grocery.getPurchase(1)).subcategoryId, store: (await grocery.getPurchase(1)).storeId }, { brand: 1, category: null, child: 3, store: 3 });
+    assert.deepEqual(await f.db.getFirstAsync('SELECT category_id, name FROM subcategories WHERE id = 3'), { category_id: 3, name: 'Corrected group' });
+    await grocery.saveBrand({ id: 1, name: 'Recorded brand renamed' });
+    await grocery.saveCategory({ id: 3, name: 'Parent renamed' });
+    await grocery.saveSubcategory({ id: 3, name: 'Group renamed', parentCategoryId: 3 });
+    await grocery.saveStore({ id: 3, name: 'Store renamed' });
+    const renamed = await grocery.getPurchase(1);
+    assert.deepEqual({ brand: renamed.brand, category: renamed.category, child: renamed.subcategory, store: renamed.store, total: renamed.lineTotal }, { brand: 'Recorded brand renamed', category: 'Parent renamed', child: 'Group renamed', store: 'Store renamed', total: 0 });
+    await grocery.setProductArchived(2, false);
+    await f.db.runAsync('UPDATE products SET brand_id = NULL WHERE id = ?', 2);
+    await grocery.updatePurchase(1, correction({ productId: 2, grouping: { category: { id: 2 } } }));
+    assert.equal((await grocery.getPurchase(1)).brandId, null);
+    assert.deepEqual(await f.db.getAllAsync('SELECT saved_price, saved_store_id FROM products ORDER BY id'), [{ saved_price: 2500, saved_store_id: 2 }, { saved_price: 3000, saved_store_id: 2 }]);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM price_history ORDER BY id'), before.price_history);
+    assert.deepEqual(await codeBytes(f.db), bytes);
+  } finally { f.cleanup(); }
+});
+
+test('late correction and deletion failures roll back fully, retry once through one Save/Delete guard, and read retry never replays a write', async () => {
+  const f = await correctionFixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    const before = await storedState(f.db);
+    const bytes = await codeBytes(f.db);
+    const draft = correction({ quantity: '3', store: { name: 'Retry store' }, grouping: { subcategory: { name: 'Retry child', parentCategory: { name: 'Retry parent' } } } });
+    await f.db.execAsync("CREATE TRIGGER reject_correction AFTER UPDATE ON purchases WHEN NEW.id = 1 BEGIN UPDATE products SET saved_price = 999, saved_store_id = 1; UPDATE price_history SET price = 999, included = 1; UPDATE purchases SET unit_price = 99 WHERE id = 2; SELECT RAISE(ABORT, 'late correction failure'); END");
+    const pending: boolean[] = [];
+    const submit = createSubmission((value) => pending.push(value));
+    await assert.rejects(submit(() => grocery.updatePurchase(1, draft)), /late correction failure/);
+    assert.deepEqual(await storedState(f.db), before);
+    assert.deepEqual(await codeBytes(f.db), bytes);
+    assert.equal(draft.quantity, '3');
+    assert.deepEqual(draft.store, { name: 'Retry store' });
+    await f.db.execAsync('DROP TRIGGER reject_correction');
+    let finish: (() => void) | undefined;
+    const saving = submit(async () => { await new Promise<void>((resolve) => { finish = resolve; }); await grocery.updatePurchase(1, draft); });
+    assert.deepEqual(pending, [true, false, true]);
+    await submit(() => grocery.deletePurchase(1));
+    await submit(() => grocery.updatePurchase(1, correction({ quantity: '999' })));
+    assert.deepEqual(pending, [true, false, true]);
+    finish!();
+    await saving;
+    assert.deepEqual(pending, [true, false, true, false]);
+    assert.deepEqual({ quantity: (await grocery.getPurchase(1)).quantity, child: (await grocery.getPurchase(1)).subcategoryId, store: (await grocery.getPurchase(1)).storeId, total: (await grocery.getMonth('2026-09')).total }, { quantity: 3, child: 3, store: 3, total: 6000 });
+    const committed = await storedState(f.db);
+    assert.deepEqual(committed.products, before.products);
+    assert.deepEqual(committed.price_history, before.price_history);
+    await f.db.execAsync('ALTER TABLE purchases RENAME COLUMN unit_price TO unreadable_price');
+    await assert.rejects(grocery.getMonth('2026-09'), /no such column/);
+    await f.db.execAsync('ALTER TABLE purchases RENAME COLUMN unreadable_price TO unit_price');
+    assert.equal((await grocery.getMonth('2026-09')).total, 6000);
+    assert.deepEqual(await storedState(f.db), committed);
+    await f.db.execAsync("CREATE TRIGGER reject_deletion AFTER DELETE ON purchases WHEN OLD.id = 1 BEGIN UPDATE products SET saved_price = 999; UPDATE price_history SET price = 999, included = 1; SELECT RAISE(ABORT, 'late deletion failure'); END");
+    const remove = createSubmission();
+    await assert.rejects(remove(() => grocery.deletePurchase(1)), /late deletion failure/);
+    assert.deepEqual(await storedState(f.db), committed);
+    await f.db.execAsync('DROP TRIGGER reject_deletion');
+    await Promise.all([remove(() => grocery.deletePurchase(1)), remove(() => grocery.deletePurchase(1))]);
+    assert.deepEqual(await f.db.getAllAsync('SELECT id, source_purchase_id FROM price_history ORDER BY id'), [{ id: 11, source_purchase_id: null }, { id: 12, source_purchase_id: 2 }]);
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [0, 2500]);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM products ORDER BY id'), before.products);
+    assert.deepEqual(await codeBytes(f.db), bytes);
+    assert.deepEqual(await f.db.getAllAsync('PRAGMA foreign_key_check'), []);
+  } finally { f.cleanup(); }
+});
+
+test('correction checks both post-update months and deletion checks its remaining month atomically', async () => {
+  const f = await correctionFixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await f.db.runAsync('UPDATE purchases SET unit_price = ? WHERE id = ?', Number.MAX_SAFE_INTEGER, 2);
+    const full = await storedState(f.db);
+    await assert.rejects(grocery.updatePurchase(1, correction({ month: '2026-10', purchaseDate: null, quantity: '1', unitPrice: '0.001', store: { name: 'Overflow store' }, grouping: { category: { name: 'Overflow category' } } })), /month total/);
+    assert.deepEqual(await storedState(f.db), full);
+    await f.db.runAsync('UPDATE purchases SET unit_price = ? WHERE id = ?', 2500, 2);
+    for (const price of [Number.MAX_SAFE_INTEGER, 1]) await f.db.runAsync('INSERT INTO purchases(product_id, brand_id, store_id, subcategory_id, month, quantity, unit_price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 1, 1, 1, 1, '2026-09', 1, price, 'owned unsafe-month fixture');
+    const unsafeOld = await storedState(f.db);
+    await assert.rejects(grocery.updatePurchase(1, correction({ month: '2026-10', purchaseDate: null, quantity: '1', unitPrice: '1.500' })), /month total/);
+    assert.deepEqual(await storedState(f.db), unsafeOld);
+    await assert.rejects(grocery.deletePurchase(1), /month total/);
+    assert.deepEqual(await storedState(f.db), unsafeOld);
+    await f.db.runAsync('DELETE FROM purchases WHERE id > ?', 2);
+    await grocery.updatePurchase(1, correction({ month: '2026-10', purchaseDate: null, quantity: '1', unitPrice: '0' }));
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [0, 2500]);
+    assert.deepEqual(await f.db.getAllAsync('PRAGMA foreign_key_check'), []);
+  } finally { f.cleanup(); }
+});
 
 test('categories and parent-scoped subcategories share name rules and stable transactional rename IDs', async () => {
   const f = await fixture();
