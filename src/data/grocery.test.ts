@@ -87,10 +87,11 @@ test('purchase labels, exact total, current baseline, and records survive databa
       await initializeDatabase(reopened.db);
       const report = await createGrocery(reopened.db, now).getMonth('2026-10');
       assert.equal(report.total, 3);
-      assert.deepEqual(report.purchases[0], { id: purchaseId, productId: 1, product: 'Milk', brand: 'Mazoon', category: 'Dairy', subcategory: null, store: 'Local store', month: '2026-10', purchaseDate: '2026-10-05', quantity: 3, unitPrice: 1, lineTotal: 3 });
+      assert.deepEqual(report.purchases[0], { id: purchaseId, productId: 1, product: 'Milk', brandId: 1, brand: 'Mazoon', categoryId: 1, resolvedCategoryId: 1, category: 'Dairy', subcategoryId: null, subcategory: null, storeId: 1, store: 'Local store', month: '2026-10', purchaseDate: '2026-10-05', quantity: 3, unitPrice: 1, lineTotal: 3 });
     } finally { reopened.close(); }
   } finally { f.cleanup(); }
 });
+
 test('older receipts leave saved defaults unset, while current changes use one private writer', async () => {
   const f = await fixture();
   try {
@@ -157,7 +158,7 @@ test('dedicated reference creates and ID renames refresh labels while preserving
       assert.deepEqual(await saved.listReferences(), { brands: [{ id: 1, name: 'Mazoon Dairy', nameKey: 'mazoon dairy' }], stores: [{ id: 1, name: 'Neighborhood market', nameKey: 'neighborhood market' }], categories: [{ id: 1, name: 'Dairy', nameKey: 'dairy' }], subcategories: [] });
       const old = await saved.getMonth('2026-09');
       assert.equal(old.total, 4000);
-      assert.deepEqual(old.purchases[0], { id: 1, productId: 1, product: 'Milk', brand: 'Mazoon Dairy', category: 'Dairy', subcategory: null, store: 'Neighborhood market', month: '2026-09', purchaseDate: null, quantity: 2, unitPrice: 2000, lineTotal: 4000 });
+      assert.deepEqual(old.purchases[0], { id: 1, productId: 1, product: 'Milk', brandId: 1, brand: 'Mazoon Dairy', categoryId: 1, resolvedCategoryId: 1, category: 'Dairy', subcategoryId: null, subcategory: null, storeId: 1, store: 'Neighborhood market', month: '2026-09', purchaseDate: null, quantity: 2, unitPrice: 2000, lineTotal: 4000 });
       const current = await saved.getMonth('2026-10');
       assert.equal(current.total, 3);
       assert.equal(current.purchases[0].brand, 'Mazoon Dairy');
@@ -392,7 +393,7 @@ test('ordinary corrections preserve recorded identity, defaults and all history;
   const f = await correctionFixture();
   try {
     const grocery = createGrocery(f.db, now);
-    const original = { id: 1, productId: 1, product: 'Milk product', brandId: 1, brand: 'Mazoon', categoryId: null, category: 'Dairy', subcategoryId: 1, subcategory: 'Milk', storeId: 1, store: 'Local store', month: '2026-09', purchaseDate: '2026-09-05', quantity: 2, unitPrice: 2000, lineTotal: 4000 };
+    const original = { id: 1, productId: 1, product: 'Milk product', brandId: 1, brand: 'Mazoon', categoryId: null, resolvedCategoryId: 1, category: 'Dairy', subcategoryId: 1, subcategory: 'Milk', storeId: 1, store: 'Local store', month: '2026-09', purchaseDate: '2026-09-05', quantity: 2, unitPrice: 2000, lineTotal: 4000 };
     assert.deepEqual(await grocery.getPurchase(1), original);
     assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [4000, 2500]);
     const before = await storedState(f.db);
@@ -406,7 +407,7 @@ test('ordinary corrections preserve recorded identity, defaults and all history;
     assert.deepEqual(await grocery.getPurchase(1), { ...original, quantity: 3, lineTotal: 6000 });
     assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [6000, 2500]);
     await grocery.updatePurchase(1, correction({ productId: 2, grouping: { category: { id: 2 } }, month: '2026-10', purchaseDate: '2026-10-07', quantity: '1', unitPrice: '1.500' }));
-    assert.deepEqual(await grocery.getPurchase(1), { ...original, productId: 2, product: 'Replacement', brandId: 2, brand: 'Marai', categoryId: 2, category: 'Other', subcategoryId: null, subcategory: null, month: '2026-10', purchaseDate: '2026-10-07', quantity: 1, unitPrice: 1500, lineTotal: 1500 });
+    assert.deepEqual(await grocery.getPurchase(1), { ...original, productId: 2, product: 'Replacement', brandId: 2, brand: 'Marai', categoryId: 2, resolvedCategoryId: 2, category: 'Other', subcategoryId: null, subcategory: null, month: '2026-10', purchaseDate: '2026-10-07', quantity: 1, unitPrice: 1500, lineTotal: 1500 });
     assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [0, 4000]);
     const changed = await storedState(f.db);
     for (const table of ['brands', 'categories', 'subcategories', 'stores', 'products', 'product_codes', 'price_history']) assert.deepEqual(changed[table], before[table], table);
@@ -592,7 +593,7 @@ test('categories and parent-scoped subcategories share name rules and stable tra
       { id: 3, name: 'Yogurt', nameKey: 'yogurt', categoryId: 1, category: 'DAIRY' },
       { id: 2, name: 'Milk', nameKey: 'milk', categoryId: 2, category: 'Other' },
     ]);
-    assert.deepEqual((await grocery.getMonth('2026-10')).purchases[0], { id: 1, productId: 1, product: 'Milk', brand: null, category: 'DAIRY', subcategory: 'MILK', store: 'Local store', month: '2026-10', purchaseDate: null, quantity: 3, unitPrice: 1, lineTotal: 3 });
+    assert.deepEqual((await grocery.getMonth('2026-10')).purchases[0], { id: 1, productId: 1, product: 'Milk', brandId: null, brand: null, categoryId: null, resolvedCategoryId: 1, category: 'DAIRY', subcategoryId: 1, subcategory: 'MILK', storeId: 1, store: 'Local store', month: '2026-10', purchaseDate: null, quantity: 3, unitPrice: 1, lineTotal: 3 });
     assert.deepEqual((await storedState(f.db)).purchases, baseline.purchases);
     assert.deepEqual((await storedState(f.db)).price_history, baseline.price_history);
   } finally { f.cleanup(); }
@@ -1163,7 +1164,7 @@ test('catalog metadata edits preserve purchase snapshots and existing subcategor
     await grocery.saveProduct(catalog({ id: 1, name: 'Corrected milk', brand: { name: 'New brand' }, grouping: { category: { name: 'Other category' } }, savedStore: null }));
     assert.deepEqual(await f.db.getAllAsync('SELECT * FROM purchases'), purchases);
     assert.deepEqual(await f.db.getAllAsync('SELECT * FROM price_history'), history);
-    assert.deepEqual((await grocery.getMonth('2026-10')).purchases[0], { id: 1, productId: 1, product: 'Corrected milk', brand: 'Mazoon', category: 'Dairy', subcategory: null, store: 'Local store', month: '2026-10', purchaseDate: null, quantity: 3, unitPrice: 1, lineTotal: 3 });
+    assert.deepEqual((await grocery.getMonth('2026-10')).purchases[0], { id: 1, productId: 1, product: 'Corrected milk', brandId: 1, brand: 'Mazoon', categoryId: 1, resolvedCategoryId: 1, category: 'Dairy', subcategoryId: null, subcategory: null, storeId: 1, store: 'Local store', month: '2026-10', purchaseDate: null, quantity: 3, unitPrice: 1, lineTotal: 3 });
     const details = await grocery.getProductDetails(1);
     assert.equal(details.brand, 'New brand');
     assert.equal(details.category, 'Other category');
@@ -1336,4 +1337,191 @@ test('shared human names reject NUL without truncation or partial writes while o
     assert.equal((await grocery.getProductDetails(1)).codes[0].original, 'Milk\0suffix');
     assert.equal((await grocery.getMonth('2026-10')).total, 3);
   } finally { f.cleanup(); }
+});
+
+async function homeFixture() {
+  const f = await fixture();
+  const grocery = createGrocery(f.db, now);
+  for (const label of ['Mazoon', 'Marai']) await grocery.saveBrand({ name: label });
+  for (const label of ['Dairy', 'Chilled']) await grocery.saveCategory({ name: label });
+  for (const label of ['Milk', 'Yogurt']) await grocery.saveSubcategory({ name: label, parentCategoryId: 1 });
+  for (const label of ['Market A', 'Market B']) await grocery.saveStore({ name: label });
+  await grocery.saveProduct(catalog({ name: 'Milk A', brand: { id: 1 }, grouping: { subcategory: { id: 1 } }, code: { format: 'qr', value: 'Home\0Milk' } }));
+  await grocery.saveProduct(catalog({ name: 'Milk B', brand: { id: 2 }, grouping: { subcategory: { id: 1 } } }));
+  await grocery.saveProduct(catalog({ name: 'Direct dairy', grouping: { category: { id: 1 } } }));
+  for (const [productId, storeId, month, quantity, price] of [[1, 1, '2026-09', '2', '2.000'], [2, 2, '2026-09', '1', '1.500'], [3, 1, '2026-09', '1', '0.500'], [1, 1, '2026-10', '3', '2.500']] as const) {
+    await grocery.recordPurchase(input({ product: { id: productId }, store: { id: storeId }, month, quantity, unitPrice: price }));
+  }
+  return f;
+}
+
+test('Home uses exact paid snapshots and refreshes literal totals after correction, month move and deletion', async () => {
+  const f = await homeFixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    const september = { month: '2026-09', total: 6000, purchaseCount: 3, previousMonth: '2026-08', previousTotal: 0, difference: 6000, percentChange: null,
+      categories: [{ id: 1, name: 'Dairy', total: 6000 }], subcategories: [{ id: 1, name: 'Milk', categoryId: 1, category: 'Dairy', total: 5500 }],
+      stores: [{ id: 1, name: 'Market A', total: 4500 }, { id: 2, name: 'Market B', total: 1500 }] };
+    const october = { month: '2026-10', total: 7500, purchaseCount: 1, previousMonth: '2026-09', previousTotal: 6000, difference: 1500, percentChange: 25,
+      categories: [{ id: 1, name: 'Dairy', total: 7500 }], subcategories: [{ id: 1, name: 'Milk', categoryId: 1, category: 'Dairy', total: 7500 }], stores: [{ id: 1, name: 'Market A', total: 7500 }] };
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-09'), september);
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), october);
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [6000, 7500]);
+    const paid = await f.db.getAllAsync('SELECT * FROM purchases ORDER BY id');
+    const bytes = await codeBytes(f.db);
+    await grocery.saveProduct(catalog({ id: 1, name: 'Current yogurt', brand: { id: 2 }, grouping: { subcategory: { id: 2 } }, savedPrice: '9.000', savedStore: { id: 2 } }));
+    await grocery.setProductArchived(2, true);
+    await f.db.runAsync('INSERT INTO price_history(product_id, price, store_id, source, effective_month, recorded_at, included, source_purchase_id) VALUES (1, 2000, 1, ?, ?, ?, 1, 1)', 'receipt', '2026-09', '2026-10-10T12:00:00Z');
+    await f.db.execAsync('UPDATE price_history SET included = 0');
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-09'), september);
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), october);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM purchases ORDER BY id'), paid);
+    assert.deepEqual(await codeBytes(f.db), bytes);
+    assert.deepEqual((await grocery.getMonth('2026-09')).purchases.map((row) => [row.id, row.brandId, row.categoryId, row.resolvedCategoryId, row.subcategoryId, row.storeId, row.lineTotal]),
+      [[3, null, 1, 1, null, 1, 500], [2, 2, null, 1, 1, 2, 1500], [1, 1, null, 1, 1, 1, 4000]]);
+    await grocery.saveCategory({ id: 1, name: 'Cold food' });
+    await grocery.saveSubcategory({ id: 1, name: 'Fresh milk', parentCategoryId: 1 });
+    await grocery.saveBrand({ id: 1, name: 'Brand A' });
+    await grocery.saveStore({ id: 1, name: 'Renamed market' });
+    const renamedOctober = { ...october, categories: [{ id: 1, name: 'Cold food', total: 7500 }],
+      subcategories: [{ id: 1, name: 'Fresh milk', categoryId: 1, category: 'Cold food', total: 7500 }], stores: [{ id: 1, name: 'Renamed market', total: 7500 }] };
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), renamedOctober);
+    assert.equal((await grocery.getPurchase(1)).brand, 'Brand A');
+    const history = await f.db.getAllAsync<{ source_purchase_id: number | null }>('SELECT * FROM price_history ORDER BY id');
+    await grocery.updatePurchase(1, correction({ purchaseDate: null, quantity: '3' }));
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), { ...renamedOctober, previousTotal: 8000, difference: -500, percentChange: -6.25 });
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [8000, 7500]);
+    await grocery.updatePurchase(2, correction({ productId: 2, store: { id: 2 }, month: '2026-10', purchaseDate: null, quantity: '1', unitPrice: '1.500' }));
+    const movedOctober = { ...renamedOctober, total: 9000, purchaseCount: 2, previousTotal: 6500, difference: 2500, percentChange: 38.46153846153847,
+      categories: [{ id: 1, name: 'Cold food', total: 9000 }], subcategories: [{ id: 1, name: 'Fresh milk', categoryId: 1, category: 'Cold food', total: 9000 }],
+      stores: [{ id: 1, name: 'Renamed market', total: 7500 }, { id: 2, name: 'Market B', total: 1500 }] };
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), movedOctober);
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [6500, 9000]);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM price_history ORDER BY id'), history);
+    await grocery.deletePurchase(4);
+    const deletedOctober = { ...movedOctober, total: 1500, purchaseCount: 1, difference: -5000, percentChange: -76.92307692307693,
+      categories: [{ id: 1, name: 'Cold food', total: 1500 }], subcategories: [{ id: 1, name: 'Fresh milk', categoryId: 1, category: 'Cold food', total: 1500 }], stores: [{ id: 2, name: 'Market B', total: 1500 }] };
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), deletedOctober);
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [6500, 1500]);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM price_history ORDER BY id'), history.map((row) => row.source_purchase_id === 4 ? { ...row, source_purchase_id: null } : row));
+    await grocery.updatePurchase(2, correction({ productId: 2, store: { id: 1 }, grouping: { category: { id: 2 } }, month: '2026-10', purchaseDate: null, quantity: '1', unitPrice: '1.500' }));
+    const regrouped = { ...deletedOctober, categories: [{ id: 2, name: 'Chilled', total: 1500 }], subcategories: [], stores: [{ id: 1, name: 'Renamed market', total: 1500 }] };
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), regrouped);
+    const reopened = open(f.path);
+    try {
+      await initializeDatabase(reopened.db);
+      assert.deepEqual(await createGrocery(reopened.db, now).getHomeAnalytics('2026-10'), regrouped);
+      assert.deepEqual(await codeBytes(reopened.db), bytes);
+      assert.deepEqual(await reopened.db.getFirstAsync('PRAGMA user_version'), { user_version: 2 });
+      assert.deepEqual(await reopened.db.getAllAsync('PRAGMA foreign_key_check'), []);
+      assert.deepEqual(await reopened.db.getFirstAsync('PRAGMA integrity_check'), { integrity_check: 'ok' });
+    } finally { reopened.close(); }
+  } finally { f.cleanup(); }
+});
+
+test('Home groups recorded child IDs under their current parent and ranks equal-name and zero groups separately', async () => {
+  const f = await homeFixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.setProductArchived(2, true);
+    const before = await f.db.getAllAsync('SELECT * FROM purchases ORDER BY id');
+    await f.db.runAsync('UPDATE subcategories SET category_id = ? WHERE id = ?', 2, 1);
+    assert.deepEqual((await grocery.getHomeAnalytics('2026-09')).categories, [{ id: 2, name: 'Chilled', total: 5500 }, { id: 1, name: 'Dairy', total: 500 }]);
+    assert.deepEqual((await grocery.getHomeAnalytics('2026-10')).subcategories, [{ id: 1, name: 'Milk', categoryId: 2, category: 'Chilled', total: 7500 }]);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM purchases ORDER BY id'), before);
+    assert.deepEqual({ raw: (await grocery.getPurchase(1)).categoryId, resolved: (await grocery.getPurchase(1)).resolvedCategoryId, child: (await grocery.getPurchase(1)).subcategoryId }, { raw: null, resolved: 2, child: 1 });
+    assert.deepEqual({ raw: (await grocery.getPurchase(3)).categoryId, resolved: (await grocery.getPurchase(3)).resolvedCategoryId }, { raw: 1, resolved: 1 });
+    await grocery.saveSubcategory({ name: 'Milk', parentCategoryId: 1 });
+    await grocery.saveProduct(catalog({ name: 'Other milk', grouping: { subcategory: { id: 3 } } }));
+    await grocery.saveProduct(catalog({ name: 'Free yogurt', grouping: { subcategory: { id: 2 } } }));
+    await grocery.recordPurchase(input({ product: { id: 4 }, store: { id: 2 }, month: '2026-08', quantity: '1', unitPrice: '1.000' }));
+    await grocery.recordPurchase(input({ product: { id: 1 }, store: { id: 1 }, month: '2026-08', quantity: '1', unitPrice: '1.000' }));
+    await grocery.recordPurchase(input({ product: { id: 5 }, store: { id: 1 }, month: '2026-08', quantity: '4', unitPrice: '0' }));
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-08'), { month: '2026-08', total: 2000, purchaseCount: 3, previousMonth: '2026-07', previousTotal: 0, difference: 2000, percentChange: null,
+      categories: [{ id: 2, name: 'Chilled', total: 1000 }, { id: 1, name: 'Dairy', total: 1000 }],
+      subcategories: [{ id: 1, name: 'Milk', categoryId: 2, category: 'Chilled', total: 1000 }, { id: 3, name: 'Milk', categoryId: 1, category: 'Dairy', total: 1000 }, { id: 2, name: 'Yogurt', categoryId: 1, category: 'Dairy', total: 0 }],
+      stores: [{ id: 1, name: 'Market A', total: 1000 }, { id: 2, name: 'Market B', total: 1000 }] });
+  } finally { f.cleanup(); }
+});
+
+test('Home distinguishes empty and zero prior months and handles the full supported year range', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), { month: '2026-10', total: 0, purchaseCount: 0, previousMonth: '2026-09', previousTotal: 0, difference: 0, percentChange: null, categories: [], subcategories: [], stores: [] });
+    await grocery.recordPurchase(input({ quantity: '2', unitPrice: '0', month: '2026-09' }));
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-09'), { month: '2026-09', total: 0, purchaseCount: 1, previousMonth: '2026-08', previousTotal: 0, difference: 0, percentChange: null,
+      categories: [{ id: 1, name: 'Dairy', total: 0 }], subcategories: [], stores: [{ id: 1, name: 'Local store', total: 0 }] });
+    for (const [month, price] of [['2026-10', '0.003'], ['2025-12', '0.002'], ['0099-12', '0.004'], ['0001-01', '0.005'], ['9999-11', '0.006']] as const) {
+      await grocery.recordPurchase(input({ product: { id: 1 }, store: { id: 1 }, month, quantity: '1', unitPrice: price }));
+    }
+    const october = await grocery.getHomeAnalytics('2026-10');
+    assert.deepEqual([october.total, october.previousTotal, october.difference, october.percentChange], [3, 0, 3, null]);
+    for (const [month, previous, prior] of [['2026-01', '2025-12', 2], ['0100-01', '0099-12', 4], ['0001-02', '0001-01', 5], ['9999-12', '9999-11', 6]] as const) {
+      const report = await grocery.getHomeAnalytics(month);
+      assert.deepEqual([report.total, report.previousMonth, report.previousTotal, report.difference, report.percentChange], [0, previous, prior, -prior, -100]);
+    }
+    assert.deepEqual(await grocery.getHomeAnalytics('0001-01'), { month: '0001-01', total: 5, purchaseCount: 1, previousMonth: null, previousTotal: null, difference: null, percentChange: null,
+      categories: [{ id: 1, name: 'Dairy', total: 5 }], subcategories: [], stores: [{ id: 1, name: 'Local store', total: 5 }] });
+    const before = await storedState(f.db);
+    for (const month of ['0000-01', '2026-13', '2026-00', '26-10', ' 2026-10']) await assert.rejects(grocery.getHomeAnalytics(month), /valid year and month/);
+    assert.deepEqual(await storedState(f.db), before);
+  } finally { f.cleanup(); }
+});
+
+test('Home keeps independently safe months exact and rejects an unsafe selected or previous total without writes', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.recordPurchase(input({ month: '2026-09', quantity: '1', unitPrice: '9007199254740.991' }));
+    await grocery.recordPurchase(input({ product: { id: 1 }, store: { id: 1 }, quantity: '1', unitPrice: '9007199254740.991' }));
+    const full = await grocery.getHomeAnalytics('2026-10');
+    assert.deepEqual([full.total, full.previousTotal, full.difference, full.percentChange, full.categories[0].total, full.stores[0].total], [9007199254740991, 9007199254740991, 0, 0, 9007199254740991, 9007199254740991]);
+    const negative = await grocery.getHomeAnalytics('2026-11');
+    assert.deepEqual([negative.difference, negative.percentChange, formatOMR(Math.abs(negative.difference!))], [-9007199254740991, -100, '9007199254740.991']);
+    const positive = await grocery.getHomeAnalytics('2026-09');
+    assert.deepEqual([positive.difference, positive.percentChange], [9007199254740991, null]);
+    await f.db.runAsync('INSERT INTO purchases(product_id, store_id, category_id, month, quantity, unit_price, created_at) VALUES (1, 1, 1, ?, 1, 1, ?)', '2026-09', 'owned overflow fixture');
+    const before = await storedState(f.db);
+    await assert.rejects(grocery.getHomeAnalytics('2026-09'), /month total/);
+    await assert.rejects(grocery.getHomeAnalytics('2026-10'), /month total/);
+    assert.deepEqual(await storedState(f.db), before);
+  } finally { f.cleanup(); }
+});
+
+test('Home reads one literal paid view across a real second-connection commit and read retry writes nothing', async () => {
+  const f = await homeFixture();
+  const writer = open(f.path);
+  try {
+    let committed = false;
+    const interleaved: Database = { ...f.db, async getAllAsync<T>(sql: string, ...params: SQLiteBindValue[]): Promise<T[]> {
+      const rows = await f.db.getAllAsync<T>(sql, ...params);
+      if (!committed) {
+        committed = true;
+        await writer.db.withExclusiveTransactionAsync(async (tx) => {
+          await tx.runAsync('UPDATE purchases SET quantity = 3 WHERE id = 1');
+          await tx.runAsync('UPDATE purchases SET quantity = 4 WHERE id = 4');
+          await tx.runAsync('UPDATE stores SET name = ?, name_key = ? WHERE id = 1', 'Committed market', 'committed market');
+        });
+      }
+      return rows;
+    } };
+    const first = await createGrocery(interleaved, now).getHomeAnalytics('2026-10');
+    assert.deepEqual(first, { month: '2026-10', total: 7500, purchaseCount: 1, previousMonth: '2026-09', previousTotal: 6000, difference: 1500, percentChange: 25,
+      categories: [{ id: 1, name: 'Dairy', total: 7500 }], subcategories: [{ id: 1, name: 'Milk', categoryId: 1, category: 'Dairy', total: 7500 }], stores: [{ id: 1, name: 'Market A', total: 7500 }] });
+    const current = { ...first, total: 10000, previousTotal: 8000, difference: 2000, categories: [{ id: 1, name: 'Dairy', total: 10000 }],
+      subcategories: [{ id: 1, name: 'Milk', categoryId: 1, category: 'Dairy', total: 10000 }], stores: [{ id: 1, name: 'Committed market', total: 10000 }] };
+    assert.deepEqual(await createGrocery(f.db, now).getHomeAnalytics('2026-10'), current);
+    const before = await storedState(f.db);
+    let fail = true;
+    const failing: Database = { ...f.db, async getAllAsync<T>(sql: string, ...params: SQLiteBindValue[]): Promise<T[]> {
+      if (fail) { fail = false; throw new Error('owned read failure'); }
+      return f.db.getAllAsync<T>(sql, ...params);
+    } };
+    const grocery = createGrocery(failing, now);
+    await assert.rejects(grocery.getHomeAnalytics('2026-10'), /owned read failure/);
+    assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), current);
+    assert.deepEqual(await storedState(f.db), before);
+    assert.deepEqual(await f.db.getAllAsync('PRAGMA foreign_key_check'), []);
+  } finally { writer.close(); f.cleanup(); }
 });
