@@ -181,14 +181,13 @@ async function writeSubcategory(tx: Executor, input: SubcategoryChange): Promise
   const parentId = await reference(tx, 'categories', { id: input.parentCategoryId });
   const selectedId = input.id === undefined ? null : id(input.id);
   if (selectedId !== null) {
-    const selected = await tx.getFirstAsync<{ category_id: number }>('SELECT category_id FROM subcategories WHERE id = ?', selectedId);
+    const selected = await tx.getFirstAsync<{ id: number }>('SELECT id FROM subcategories WHERE id = ?', selectedId);
     if (!selected) throw new Error('The selected subcategory no longer exists.');
-    if (selected.category_id !== parentId) throw new Error('Renaming keeps the subcategory in its existing parent category.');
   }
   const duplicate = await tx.getFirstAsync<{ id: number }>('SELECT id FROM subcategories WHERE category_id = ? AND name_key = ? AND (? IS NULL OR id != ?)', parentId, key, selectedId, selectedId);
   if (duplicate) throw new Error('That subcategory already exists in this category. Select the saved record.');
   if (selectedId !== null) {
-    await tx.runAsync('UPDATE subcategories SET name = ?, name_key = ? WHERE id = ?', label, key, selectedId);
+    await tx.runAsync('UPDATE subcategories SET category_id = ?, name = ?, name_key = ? WHERE id = ?', parentId, label, key, selectedId);
     return selectedId;
   }
   return (await tx.runAsync('INSERT INTO subcategories(category_id, name, name_key) VALUES (?, ?, ?)', parentId, label, key)).lastInsertRowId;
