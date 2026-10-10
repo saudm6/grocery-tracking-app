@@ -84,13 +84,19 @@ def record(event, **details):
     marker = os.getenv('BOUNDED_CLEANUP_FAILED_FILE')
     if marker and event == 'cleanup-failed':
         with pathlib.Path(marker).open('a') as stream: stream.write(encoded + '\n')
-def group_members():
+def group_members(strict=False):
     if os.name != 'posix': return []
     try:
         rows = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,stat='], capture_output=True,
                               text=True, timeout=2, check=True).stdout.splitlines()
-        return [row.split() for row in rows if len(row.split()) == 4 and row.split()[2] == str(p.pid)][:40]
-    except Exception as error: return {'diagnosticError': type(error).__name__}
+        fields = [row.split() for row in rows if row.strip()]
+        if not fields or any(len(row) != 4 or not all(value.isdigit() for value in row[:3]) for row in fields):
+            raise RuntimeError('Owned-group process snapshot is empty or malformed')
+        members = [row for row in fields if row[2] == str(p.pid)]
+        return members if strict else members[:40]
+    except Exception as error:
+        if strict: raise
+        return {'diagnosticError': type(error).__name__}
 def cancel(signum, frame):
     global received_signal, primary
     received_signal = signum
@@ -138,6 +144,10 @@ finally:
                 while True:
                     try: os.killpg(p.pid, 0)
                     except ProcessLookupError: break
+                    except PermissionError:
+                        if not group_members(strict=True):
+                            record('group-absence-proven', method='validated-ps-after-signal-zero-EPERM')
+                            break
                     if time.monotonic() >= deadline: raise RuntimeError('Owned command group did not finish cleanup')
                     time.sleep(0.05)
             record('cleanup-complete', childStatus=p.returncode)
@@ -151,6 +161,18 @@ PY
 failure_tail() {
   printf '[failure-tail] %s (at most 80 lines, 2048 characters per line)\n' "$1"
   tail -n 80 "$2" | awk '{ print substr($0, 1, 2048); fflush(); }'
+}
+
+driver_logs() {
+  local root="${XDG_STATE_HOME:+$XDG_STATE_HOME/maestro}" file destination
+  root="${root:-$HOME/.maestro}"
+  mkdir -p "$evidence/maestro/driver" || return 1
+  for file in "$root"/tests/*/maestro.log "$root"/tests/*/xctest_runner_*.log; do
+    [[ -f "$file" ]] || continue
+    destination="$evidence/maestro/driver/$(basename "$(dirname "$file")")-$(basename "$file")"
+    cp "$file" "$destination" || return 1
+    failure_tail driver-diagnostic "$destination" || return 1
+  done
 }
 
 run_stage() {
@@ -292,6 +314,53 @@ for reason, signum, expected in [('SIGINT', signal.SIGINT, 130), ('SIGTERM', sig
                 except ProcessLookupError: pass
             elif child.poll() is None: child.kill()
             child.wait()
+import json, types
+original_os_module, original_run = sys.modules['os'], subprocess.run
+original_sigkill = getattr(signal, 'SIGKILL', None)
+for snapshot_case in ['absent', 'present', 'query-failure', 'malformed', 'empty']:
+    observed = []
+    marker = directory / ('eperm-' + snapshot_case)
+    def observed_exit(*args, **kwargs):
+        child = original_popen(*args, **kwargs)
+        observed.append(child)
+        return child
+    def permission_checked_group(pgid, signum):
+        assert len(observed) == 1 and pgid == observed[0].pid
+        assert observed[0].poll() is not None, 'Direct child must already be reaped'
+        if signum == 0: raise PermissionError('fixture signal-zero EPERM')
+    def process_snapshot(command, **kwargs):
+        assert command == ['ps', '-axo', 'pid=,ppid=,pgid=,stat='] and kwargs['timeout'] == 2 and kwargs['check']
+        if snapshot_case == 'query-failure': raise subprocess.TimeoutExpired(command, 2)
+        output = '1 0 1 S\n'
+        if snapshot_case == 'present': output += f'{observed[0].pid} 1 {observed[0].pid} S\n'
+        if snapshot_case == 'malformed':
+            output += ''.join(f'{pid} 1 1 S\n' for pid in range(100, 145)) + 'unparseable process row\n'
+        if snapshot_case == 'empty': output = ''
+        return types.SimpleNamespace(stdout=output)
+    fake_os = types.ModuleType('os')
+    fake_os.name, fake_os.getenv, fake_os.killpg = 'posix', os.getenv, permission_checked_group
+    if original_sigkill is None: signal.SIGKILL = 9
+    sys.modules['os'], subprocess.Popen, subprocess.run = fake_os, observed_exit, process_snapshot
+    os.environ['BOUNDED_CLEANUP_FAILED_FILE'] = str(marker)
+    sys.argv = ['bounded', '5', sys.executable, '-c', 'raise SystemExit(0)']
+    try:
+        try: exec(compile(body, 'bounded_run', 'exec'), {})
+        except SystemExit as result:
+            assert snapshot_case == 'absent' and result.code == 0 and not marker.exists()
+        except (RuntimeError, subprocess.TimeoutExpired):
+            assert snapshot_case != 'absent' and marker.exists()
+            assert json.loads(marker.read_text())['primary']['exitCode'] == 0
+        else: raise AssertionError('Exact helper must preserve exit or deny unproved cleanup')
+        assert len(observed) == 1 and observed[0].poll() is not None
+        print(f'Signal-zero EPERM/{snapshot_case}: owned child{observed[0].pid} reaped; cleanup denied={marker.exists()}')
+    finally:
+        sys.modules['os'], subprocess.Popen, subprocess.run, sys.argv = original_os_module, original_popen, original_run, original_argv[:]
+        os.environ.pop('BOUNDED_CLEANUP_FAILED_FILE')
+        if original_sigkill is None: del signal.SIGKILL
+        for s, handler in original_handlers.items(): signal.signal(s, handler)
+        for child in observed:
+            if child.poll() is None: child.kill()
+            child.wait()
 cleanup_child = None
 class CleanupFailureChild(original_popen):
     waits = 0
@@ -361,13 +430,15 @@ if [[ "${1:-}" == --cache-preflight ]]; then
 fi
 
 cleanup() {
-  local result=$? cache_kib network_proven=0 primary_result
+  local result=$? cache_kib network_proven=0 primary_result safe_upload=0 cache_save_ok=0
   primary_result="$result"
   trap - EXIT INT TERM
+  printf '[cleanup-entry] primaryExit=%s stage=%s offlineStarted=%s\n' "$primary_result" "$active_stage" "$offline_started"
   if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi
   if prove_restoration "$state" "$offline_started" 155; then
     network_proven=1
   else result=1; fi
+  printf '[cleanup-network] proven=%s withdrawn=%s ownedCleanupMarker=%s upload=pending-final-cleanup\n' "$network_proven" "$offline_started" "$(test ! -f "$evidence/command-cleanup-failed" && printf absent || printf present)"
   if [[ -n "$guard_pid" && ( "$offline_started" == 0 || -f "$state/restored" ) ]]; then
     kill "$guard_pid" 2>/dev/null || true
   fi
@@ -376,17 +447,18 @@ cleanup() {
     bounded_run 30 xcrun simctl io "$udid" screenshot "$evidence/final-screen.png" > "$evidence/cleanup-screenshot.log" 2>&1 || failure_tail cleanup-screenshot "$evidence/cleanup-screenshot.log"
     bounded_run 60 xcrun simctl shutdown "$udid" > "$evidence/cleanup-shutdown.log" 2>&1 || failure_tail cleanup-shutdown "$evidence/cleanup-shutdown.log"
   fi
+  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
   if [[ "$network_proven" == 1 && ! -f "$evidence/command-cleanup-failed" ]]; then
-    printf 'safe_to_upload=true\n' >> "$GITHUB_OUTPUT"
+    safe_upload=1
     if [[ -d "$compiler_cache" ]] && cache_kib="$(du -sk "$compiler_cache" | awk '{print $1}')"; then
       printf 'directory=%s\nsizeKiB=%s\n' "$compiler_cache" "$cache_kib" > "$evidence/compiler-cache-size.txt"
       if [[ "$cache_kib" =~ ^[0-9]+$ && "$cache_kib" -gt 0 && "$cache_kib" -le 2097152 ]]; then
-        printf 'compiler_cache_save_ok=true\n' >> "$GITHUB_OUTPUT"
+        cache_save_ok=1
       fi
     fi
   else result=1; fi
   if [[ "$result" != 0 ]]; then passed=false; fi
-  EXPECTED_SHA="$EXPECTED_SHA" EVIDENCE="$evidence" PASSED="$passed" RESULT="$result" PRIMARY_RESULT="$primary_result" OFFLINE_STARTED="$offline_started" UDID="$udid" ACTIVE_STAGE="$active_stage" python3 - <<'PY'
+  if EXPECTED_SHA="$EXPECTED_SHA" EVIDENCE="$evidence" PASSED="$passed" RESULT="$result" PRIMARY_RESULT="$primary_result" OFFLINE_STARTED="$offline_started" UDID="$udid" ACTIVE_STAGE="$active_stage" python3 - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ['EVIDENCE'])
 receipt = {'sourceSHA': os.environ['EXPECTED_SHA'], 'workflowSHA': os.getenv('GITHUB_WORKFLOW_SHA'),
@@ -408,6 +480,15 @@ receipt = {'sourceSHA': os.environ['EXPECTED_SHA'], 'workflowSHA': os.getenv('GI
 (p/'receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
 print('[cleanup-receipt] ' + json.dumps(receipt), flush=True)
 PY
+  then
+    if [[ "$safe_upload" == 1 ]]; then
+      printf 'safe_to_upload=true\n' >> "$GITHUB_OUTPUT"
+      if [[ "$cache_save_ok" == 1 ]]; then printf 'compiler_cache_save_ok=true\n' >> "$GITHUB_OUTPUT"; fi
+    fi
+  else
+    printf '[cleanup-receipt-failed] primaryExit=%s finalExit=1 networkProven=%s safeToUpload=false compilerCacheSave=false\n' "$primary_result" "$network_proven" >&2
+    result=1
+  fi
   exit "$result"
 }
 trap cleanup EXIT
@@ -436,6 +517,7 @@ run_stage maestro-download 600 curl --fail --location --retry 3 'https://github.
 printf '%s  %s\n' 5384593cb4e7a106489e75a821d157dd43f4e438df6bc308b72e82c685e1283a "$tools_dir/maestro.zip" | shasum -a 256 -c -
 unzip -q "$tools_dir/maestro.zip" -d "$tools_dir"
 export PATH="$tools_dir/maestro/bin:$PATH" JAVA_HOME="$JAVA_HOME_21_X64" MAESTRO_CLI_NO_ANALYTICS=1
+export MAESTRO_DRIVER_STARTUP_TIMEOUT=240000 MAESTRO_DISABLE_UPDATE_CHECK=true
 maestro --version >> "$evidence/toolchain.txt"
 shasum -a 256 "$tools_dir/template.tgz" "$tools_dir/maestro.zip" > "$evidence/tool-checksums.txt"
 
@@ -472,6 +554,13 @@ udid="$(xcrun simctl create grocery-ios-proof com.apple.CoreSimulator.SimDeviceT
 printf '%s\n' "$udid" > "$evidence/simulator-udid.txt"
 xcrun simctl boot "$udid"
 run_stage simulator-boot 600 xcrun simctl bootstatus "$udid" -b
+if run_stage driver-warmup 600 maestro --verbose --platform ios --device "$udid" hierarchy --no-reinstall-driver; then
+  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
+else
+  driver_result=$?
+  driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
+  exit "$driver_result"
+fi
 build_args=(-workspace "$workspace" -scheme "$scheme" -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=$udid" -derivedDataPath "$RUNNER_TEMP/grocery-ios-derived" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO ONLY_ACTIVE_ARCH=YES COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES)
 active_stage=build-settings
 bounded_run 300 xcodebuild "${build_args[@]}" -showBuildSettings -json > "$evidence/build-settings.json"
@@ -508,8 +597,6 @@ tar -czf "$evidence/app.tar.gz" -C "$(dirname "$app")" "$(basename "$app")"
 xcrun simctl install "$udid" "$app"
 installed="$(xcrun simctl get_app_container "$udid" com.saudm6.grocerytracker app)"
 cmp "$app/main.jsbundle" "$installed/main.jsbundle"
-active_stage=driver-warmup
-bounded_run 300 maestro --device "$udid" hierarchy > "$evidence/driver-warmup.json"
 
 python3 -m http.server 9187 --bind 127.0.0.1 --directory "$tools_dir" > "$state/loopback.log" 2>&1 &
 loopback_pid=$!
@@ -544,7 +631,7 @@ proof_date="$(date '+%Y-%m-%d')"
 proof_month="${proof_date:0:7}"
 printf '%s\n' "$proof_date" > "$evidence/proof-date.txt"
 active_stage=offline-ui
-bounded_run 120 maestro --device "$udid" test tests/native/ios-smoke.yaml -e "MONTH=$proof_month" --format JUNIT --output "$evidence/maestro/junit.xml" --debug-output "$evidence/maestro/debug" --test-output-dir "$evidence/maestro/artifacts" 2>&1 | tee "$evidence/maestro/output.log"
+MAESTRO_DRIVER_STARTUP_TIMEOUT=120000 bounded_run 120 maestro --platform ios --device "$udid" test tests/native/ios-smoke.yaml --no-reinstall-driver -e "MONTH=$proof_month" --format JUNIT --output "$evidence/maestro/junit.xml" --debug-output "$evidence/maestro/debug" --test-output-dir "$evidence/maestro/artifacts" 2>&1 | tee "$evidence/maestro/output.log"
 probe completed offline
 [[ ! -f "$state/offline-violation" && ! -f "$state/guard-fired" ]]
 [[ "$(date '+%Y-%m-%d')" == "$proof_date" ]]
