@@ -1,0 +1,114 @@
+name: iOS Simulator
+
+on:
+  pull_request:
+    paths:
+      - package.json
+      - package-lock.json
+      - app.json
+      - app.config.*
+      - babel.config.*
+      - metro.config.*
+      - react-native.config.*
+      - assets/icon.png
+      - plugins/**
+      - modules/**
+      - ios/**
+      - android/**
+      - src/data/schema.ts
+      - src/data/provider.tsx
+      - .github/workflows/ios-simulator.yml
+      - scripts/verify-ios-simulator.sh
+      - tests/native/**
+  push:
+    branches: [main]
+    paths:
+      - package.json
+      - package-lock.json
+      - app.json
+      - app.config.*
+      - babel.config.*
+      - metro.config.*
+      - react-native.config.*
+      - assets/icon.png
+      - plugins/**
+      - modules/**
+      - ios/**
+      - android/**
+      - src/data/schema.ts
+      - src/data/provider.tsx
+      - .github/workflows/ios-simulator.yml
+      - scripts/verify-ios-simulator.sh
+      - tests/native/**
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact commit to build and verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-simulator-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-ios:
+    runs-on: macos-26-intel
+    timeout-minutes: 240
+    env:
+      EXPECTED_SHA: ${{ inputs.source_sha || github.event.pull_request.head.sha || github.sha }}
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      CI: '1'
+      EXPO_NO_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Check source and proof helpers
+        run: |
+          npm run typecheck
+          npm run lint
+          npm test
+          node tests/native/assert-ios-db.mjs --self-test
+          bash scripts/verify-ios-simulator.sh --self-test
+      - name: Prove connectivity before compiler cache restore
+        id: cache-network
+        run: bash scripts/verify-ios-simulator.sh --cache-preflight
+      - name: Restore compiler results only
+        id: compiler-cache
+        if: steps.cache-network.outputs.cache_network_ready == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/grocery-ios-derived/CompilationCache.noindex
+          key: ios-cas-v1-${{ steps.cache-network.outputs.image_version }}-xcode26.6-ios26.5-intel-release-${{ hashFiles('package-lock.json', 'app.json') }}-${{ env.EXPECTED_SHA }}
+          restore-keys: ios-cas-v1-${{ steps.cache-network.outputs.image_version }}-xcode26.6-ios26.5-intel-release-${{ hashFiles('package-lock.json', 'app.json') }}-
+      - name: Build and exercise the native Release app
+        id: native
+        env:
+          COMPILER_CACHE_HIT: ${{ steps.compiler-cache.outputs.cache-hit }}
+          COMPILER_CACHE_MATCHED_KEY: ${{ steps.compiler-cache.outputs.cache-matched-key }}
+        run: bash scripts/verify-ios-simulator.sh
+      - name: Upload native evidence
+        if: always() && steps.native.outputs.safe_to_upload == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-simulator-${{ env.EXPECTED_SHA }}
+          path: ${{ runner.temp }}/grocery-ios-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Save bounded compiler results after proven restoration
+        if: always() && steps.native.outputs.safe_to_upload == 'true' && steps.native.outputs.compiler_cache_save_ok == 'true' && steps.compiler-cache.outputs.cache-hit != 'true' && steps.compiler-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/grocery-ios-derived/CompilationCache.noindex
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
