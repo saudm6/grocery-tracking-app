@@ -1881,3 +1881,239 @@ test('stale eligibility and real connection locks reject primary writes while ad
     assert.deepEqual(pending, [true, false, true, false]);
   } finally { second.close(); f.cleanup(); }
 });
+
+test('Inflation counts signed changes from excluded actual predecessors and keeps the excluded period-end price', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.saveProduct(catalog());
+    await grocery.saveProduct(catalog({ name: 'Signed milk', grouping: { category: { id: 1 } } }));
+    for (const [historyId, productId, price, month, included] of [
+      [1, 1, 20000, '2026-01', 1], [2, 1, 22000, '2026-02', 0], [3, 1, 23000, '2026-03', 1],
+      [4, 2, 20000, '2026-01', 1], [5, 2, 18000, '2026-02', 0], [6, 2, 21000, '2026-03', 1], [7, 2, 20000, '2026-04', 1], [8, 2, 19000, '2026-05', 0],
+    ] as const) await f.db.runAsync("INSERT INTO price_history(id, product_id, price, source, effective_month, recorded_at, included) VALUES (?, ?, ?, 'receipt', ?, '2026-10-09T08:00:00.000Z', ?)", historyId, productId, price, month, included);
+    await grocery.saveProduct(catalog({ id: 1, grouping: { category: { id: 1 } }, savedPrice: '30.000' }));
+    const before = await storedState(f.db);
+    const report = await grocery.getInflation(null, '2026-01', '2026-03');
+    assert.deepEqual(report.map((row) => [row.id, row.increase, row.referencePrice, row.percentIncrease, row.periodEndPrice]), [[2, 3000, 18000, 3000 / 18000 * 100, 21000], [1, 1000, 22000, 1000 / 22000 * 100, 23000]]);
+    assert.deepEqual(report[1].points.map((point) => [point.id, point.price, point.previousPrice, point.countedChange, point.baseline, point.gapBefore]), [[1, 20000, null, 0, true, false], [3, 23000, 22000, 1000, false, true]]);
+    const march = (await grocery.getInflation(null, '2026-03', '2026-03'))[1];
+    assert.deepEqual([march.increase, march.referencePrice, march.points.map((point) => [point.id, point.gapBefore])], [1000, 22000, [[3, false]]]);
+    const signed = (await grocery.getInflation(null, '2026-03', '2026-05'))[0];
+    assert.deepEqual([signed.id, signed.increase, signed.referencePrice, signed.percentIncrease, signed.periodEndPrice], [2, 2000, 18000, 2000 / 18000 * 100, 19000]);
+    assert.deepEqual(signed.points.map((point) => [point.id, point.price, point.previousPrice, point.countedChange, point.gapBefore]), [[6, 21000, 18000, 3000, false], [7, 20000, 21000, -1000, false]]);
+    assert.deepEqual(await grocery.getInflation(null, '2026-04', '2026-04'), []);
+    assert.equal((await grocery.getProductDetails(1)).savedPrice, 30000);
+    assert.deepEqual((await grocery.getProductDetails(2)).history.map((point) => point.id), [4, 5, 6, 7, 8]);
+    assert.deepEqual(await storedState(f.db), before);
+  } finally { f.cleanup(); }
+});
+
+test('Inflation uses the first included negative or zero change reference, nullable zero percentages and stable positive-net ranks', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    for (let product = 1; product <= 6; product++) await grocery.saveProduct(catalog({ name: `Product ${product}`, grouping: product === 1 ? { category: { name: 'Dairy' } } : { category: { id: 1 } } }));
+    let historyId = 0;
+    for (const [productId, price, month, included] of [
+      [1, 2000, '2026-01', 1], [1, 1500, '2026-02', 1], [1, 2000, '2026-03', 1], [1, 2500, '2026-04', 1],
+      [2, 2000, '2026-01', 1], [2, 2000, '2026-02', 1], [2, 2500, '2026-03', 1],
+      [3, 0, '2026-01', 1], [3, 1000, '2026-02', 1],
+      [4, 2000, '2026-01', 1], [4, 2000, '2026-02', 1],
+      [5, 20000, '2026-01', 0], [5, 18000, '2026-02', 0], [5, 20000, '2026-03', 1],
+      [6, 2000, '2026-01', 1], [6, 2500, '2026-02', 0],
+    ] as const) await f.db.runAsync("INSERT INTO price_history(id, product_id, price, source, effective_month, recorded_at, included) VALUES (?, ?, ?, 'receipt', ?, '2026-10-09T08:00:00.000Z', ?)", ++historyId, productId, price, month, included);
+    const report = await grocery.getInflation(null, '2026-01', '2026-04');
+    assert.deepEqual(report.map((row) => [row.id, row.increase, row.referencePrice, row.percentIncrease]), [[5, 2000, 18000, 2000 / 18000 * 100], [3, 1000, 0, null], [1, 500, 2000, 25], [2, 500, 2000, 25]]);
+    assert.deepEqual(report[0].points.map((point) => [point.price, point.included, point.baseline, point.gapBefore]), [[20000, false, true, false], [20000, true, false, true]]);
+    assert.deepEqual(report[2].points.map((point) => point.countedChange), [0, -500, 500, 500]);
+    assert.deepEqual((await grocery.getInflation(null, '2026-02', '2026-04')).map((row) => [row.id, row.referencePrice]), [[5, 18000], [3, 0], [1, 2000], [2, 2000]]);
+    assert.deepEqual((await grocery.getInflation(null, '2026-02', '2026-02')).map((row) => [row.id, row.increase, row.percentIncrease]), [[3, 1000, null]]);
+    assert.deepEqual((await grocery.getInflation(null, '2026-03', '2026-03'))[0].points.map((point) => [point.price, point.gapBefore]), [[20000, false]]);
+    assert.deepEqual(await grocery.getInflation(null, '2026-01', '2026-01'), []);
+  } finally { f.cleanup(); }
+});
+
+test('Inflation orders exact days before month-only stable ID ties and never adds outside-range chart anchors', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.saveProduct(catalog());
+    for (const [historyId, price, month, date, included, source, recorded] of [
+      [1, 1000, '2026-01', null, 1, 'receipt', '2026-10-12T08:00:00.000Z'],
+      [33, 1300, '2026-03', '2026-03-30', 1, 'saved_price', '2026-03-30T08:00:00.000Z'],
+      [34, 1100, '2026-03', '2026-03-30', 0, 'saved_price', '2026-03-30T09:00:00.000Z'],
+      [2, 1400, '2026-03', null, 1, 'receipt', '2026-10-11T08:00:00.000Z'],
+      [5, 1200, '2026-03', null, 1, 'receipt', '2026-10-10T08:00:00.000Z'],
+    ] as const) await f.db.runAsync('INSERT INTO price_history(id, product_id, price, source, effective_month, effective_date, recorded_at, included) VALUES (?, 1, ?, ?, ?, ?, ?, ?)', historyId, price, source, month, date, recorded, included);
+    const [report] = await grocery.getInflation(null, '2026-03', '2026-03');
+    assert.deepEqual([report.increase, report.referencePrice, report.percentIncrease, report.periodEndPrice], [400, 1000, 40, 1200]);
+    assert.deepEqual(report.points.map((point) => [point.id, point.source, point.effectiveMonth, point.effectiveDate, point.previousPrice, point.countedChange, point.gapBefore, point.recordedAt]), [
+      [33, 'saved_price', '2026-03', '2026-03-30', 1000, 300, false, '2026-03-30T08:00:00.000Z'],
+      [2, 'receipt', '2026-03', null, 1100, 300, true, '2026-10-11T08:00:00.000Z'],
+      [5, 'receipt', '2026-03', null, 1400, -200, false, '2026-10-10T08:00:00.000Z'],
+    ]);
+    assert.deepEqual((await grocery.getProductDetails(1)).history.map((point) => point.id), [1, 33, 34, 2, 5]);
+  } finally { f.cleanup(); }
+});
+
+test('Inflation recomputes after real receipt Apply, flags, earlier baselines, ordinary versus explicit corrections and deletions', async () => {
+  const f = await fixture();
+  try {
+    let current = new Date('2026-01-09T08:00:00.000Z');
+    const grocery = createGrocery(f.db, () => current);
+    await grocery.saveProduct(catalog({ savedPrice: '2.000', savedStore: { name: 'January store' }, code: { format: 'qr', value: 'Inflation\0QR' } }));
+    current = new Date('2026-10-10T08:00:00.000Z');
+    await grocery.saveProduct(catalog({ id: 1, grouping: { category: { id: 1 } }, savedPrice: '2.800', savedStore: { name: 'Today store' }, code: { format: 'qr', value: '\ufeffInflation' } }));
+    const bytes = await codeBytes(f.db);
+    const marchId = await grocery.recordPurchase(input({ product: { id: 1 }, store: { id: 1 }, month: '2026-03', quantity: '2', unitPrice: '2.500' }));
+    assert.deepEqual(await grocery.getInflation(null, '2026-03', '2026-03'), []);
+    await grocery.applyReceiptInflation(marchId);
+    const [march] = await grocery.getInflation(null, '2026-03', '2026-03');
+    assert.deepEqual([march.increase, march.referencePrice, march.percentIncrease, march.periodEndPrice], [500, 2000, 25, 2500]);
+    assert.deepEqual(march.points.map((point) => [point.id, point.sourcePurchaseId, point.source, point.effectiveDate, point.recordedAt]), [[3, marchId, 'receipt', null, '2026-10-10T08:00:00.000Z']]);
+    const applied = await storedState(f.db);
+    await grocery.applyReceiptInflation(marchId);
+    assert.deepEqual(await storedState(f.db), applied);
+    await grocery.setPriceChangeInflationStatus(3, false);
+    assert.deepEqual(await grocery.getInflation(null, '2026-03', '2026-03'), []);
+    const [october] = await grocery.getInflation(null, '2026-10', '2026-10');
+    assert.deepEqual([october.increase, october.referencePrice, october.percentIncrease], [300, 2500, 12]);
+    await grocery.setPriceChangeInflationStatus(3, true);
+    const earlierId = await grocery.recordPurchase(input({ product: { id: 1 }, store: { id: 1 }, month: '2025-12', quantity: '1', unitPrice: '1.000' }));
+    await grocery.applyReceiptInflation(earlierId);
+    const [earlier] = await grocery.getInflation(null, '2026-01', '2026-03');
+    assert.deepEqual([earlier.increase, earlier.referencePrice, earlier.percentIncrease, earlier.periodEndPrice], [1500, 1000, 150, 2500]);
+    await grocery.updatePurchase(marchId, correction({ month: '2026-04', purchaseDate: '2026-04-09', quantity: '3', unitPrice: '2.600', store: { id: 2 } }));
+    assert.deepEqual(await grocery.getInflation(null, '2026-03', '2026-03'), [march]);
+    assert.deepEqual([(await grocery.getMonth('2026-03')).total, (await grocery.getMonth('2026-04')).total], [0, 7800]);
+    await grocery.updatePurchase(marchId, correction({ month: '2026-04', purchaseDate: '2026-04-09', quantity: '3', unitPrice: '2.600', store: { id: 2 } }), { applyInflation: true });
+    const [april] = await grocery.getInflation(null, '2026-04', '2026-04');
+    assert.deepEqual([april.increase, april.referencePrice, april.percentIncrease, april.periodEndPrice, april.points[0].id, april.points[0].recordedAt], [600, 2000, 30, 2600, 3, '2026-10-10T08:00:00.000Z']);
+    await grocery.deletePurchase(marchId);
+    const detached = await grocery.getInflation(null, '2026-04', '2026-04');
+    assert.deepEqual(detached, [{ ...april, points: [{ ...april.points[0], sourcePurchaseId: null }] }]);
+    await grocery.deletePurchase(earlierId, { applyInflation: true });
+    assert.deepEqual(await grocery.getInflation(null, '2026-01', '2026-03'), []);
+    assert.deepEqual(await grocery.getInflation(null, '2026-04', '2026-04'), detached);
+    const details = await grocery.getProductDetails(1);
+    assert.deepEqual([details.savedPrice, details.savedStoreId, details.priceFirstSet, details.lastSavedPriceChanged], [2800, 2, '2026-01-09T08:00:00.000Z', '2026-10-10T08:00:00.000Z']);
+    assert.deepEqual(await codeBytes(f.db), bytes);
+    const committed = await storedState(f.db);
+    const reopened = open(f.path);
+    try {
+      await initializeDatabase(reopened.db);
+      assert.deepEqual(await createGrocery(reopened.db, now).getInflation(null, '2026-04', '2026-04'), detached);
+      assert.deepEqual(await storedState(reopened.db), committed);
+      assert.deepEqual(await codeBytes(reopened.db), bytes);
+      assert.deepEqual(await reopened.db.getAllAsync('PRAGMA foreign_key_check'), []);
+      assert.deepEqual(await reopened.db.getFirstAsync('PRAGMA integrity_check'), { integrity_check: 'ok' });
+    } finally { reopened.close(); }
+  } finally { f.cleanup(); }
+});
+
+test('Inflation uses current product grouping, both sources and archived history while primary choices and recorded paid grouping stay separate', async () => {
+  const f = await fixture();
+  try {
+    let current = new Date('2026-01-09T08:00:00.000Z');
+    const grocery = createGrocery(f.db, () => current);
+    await grocery.saveCategory({ name: 'Dairy' });
+    await grocery.saveCategory({ name: 'Chilled' });
+    await grocery.saveSubcategory({ name: 'Milk', parentCategoryId: 1 });
+    await grocery.saveProduct(catalog({ brand: { name: 'Mazoon' }, grouping: { subcategory: { id: 1 } }, savedPrice: '2.000', savedStore: { name: 'Market' } }));
+    await grocery.saveProduct(catalog({ name: 'Other milk', brand: { name: 'Marai' }, grouping: { subcategory: { id: 1 } }, savedPrice: '1.000' }));
+    await grocery.saveProduct(catalog({ name: 'Direct product', grouping: { category: { id: 1 } }, savedPrice: '3.000' }));
+    current = new Date('2026-10-10T08:00:00.000Z');
+    for (const [productId, price] of [[1, '2.500'], [2, '1.500'], [3, '4.000']] as const) {
+      await grocery.saveProduct(catalog({ id: productId, name: productId === 1 ? 'Catalog milk' : productId === 2 ? 'Other milk' : 'Direct product', brand: productId === 3 ? null : { id: productId }, grouping: productId === 3 ? { category: { id: 1 } } : { subcategory: { id: 1 } }, savedPrice: price }));
+    }
+    const paidId = await grocery.recordPurchase(input({ product: { id: 1 }, store: { id: 1 }, month: '2026-03', quantity: '2', unitPrice: '2.200' }));
+    await grocery.applyReceiptInflation(paidId);
+    const directId = await grocery.recordPurchase(input({ product: { id: 3 }, store: { id: 1 }, month: '2026-03', quantity: '1', unitPrice: '3.000' }));
+    await grocery.setPrimaryBrand(1, 1);
+    assert.deepEqual((await grocery.getInflation(null, '2026-01', '2026-10')).map((row) => [row.id, row.increase]), [[3, 1000], [1, 500], [2, 500]]);
+    const before = await storedState(f.db);
+    await grocery.saveProduct(catalog({ id: 1, brand: { id: 1 }, grouping: { category: { id: 2 } } }));
+    await grocery.setProductArchived(2, true);
+    assert.deepEqual((await grocery.getInflation(1, '2026-01', '2026-10')).map((row) => [row.id, row.increase, row.archived]), [[3, 1000, false], [2, 500, true]]);
+    const [currentGroup] = await grocery.getInflation(2, '2026-03', '2026-03');
+    assert.deepEqual([currentGroup.id, currentGroup.categoryId, currentGroup.category, currentGroup.increase, currentGroup.points[0].sourcePurchaseId], [1, 2, 'Chilled', 200, paidId]);
+    assert.deepEqual([(await grocery.getPurchase(paidId)).categoryId, (await grocery.getPurchase(paidId)).subcategoryId, (await grocery.getPurchase(paidId)).category], [null, 1, 'Dairy']);
+    await grocery.saveProduct(catalog({ id: 1, brand: { id: 1 }, grouping: { subcategory: { id: 1 } } }));
+    await f.db.runAsync('UPDATE subcategories SET category_id = ? WHERE id = ?', 2, 1);
+    assert.deepEqual((await grocery.getInflation(2, '2026-01', '2026-10')).map((row) => [row.id, row.categoryId, row.increase, row.archived]), [[1, 2, 500, false], [2, 2, 500, true]]);
+    assert.deepEqual([(await grocery.getPurchase(paidId)).categoryId, (await grocery.getPurchase(paidId)).subcategoryId, (await grocery.getPurchase(paidId)).category], [null, 1, 'Chilled']);
+    assert.deepEqual([(await grocery.getPurchase(directId)).categoryId, (await grocery.getPurchase(directId)).subcategoryId, (await grocery.getPurchase(directId)).category], [1, null, 'Dairy']);
+    assert.deepEqual((await grocery.getInflation(1, '2026-01', '2026-10')).map((row) => [row.id, row.increase]), [[3, 1000]]);
+    assert.deepEqual((await storedState(f.db)).purchases, before.purchases);
+    assert.deepEqual((await storedState(f.db)).price_history, before.price_history);
+    assert.equal((await grocery.getMonth('2026-03')).total, 7400);
+  } finally { f.cleanup(); }
+});
+
+test('Inflation keeps cancelling unsafe intermediate sums exact and rejects unsafe final signed amounts and invalid filters without writes', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.saveProduct(catalog());
+    await grocery.saveProduct(catalog({ name: 'Negative limit', grouping: { category: { name: 'Other' } } }));
+    const limit = Number.MAX_SAFE_INTEGER;
+    for (const [productId, price, month, included] of [
+      [1, 0, '2026-01', 1], [1, limit, '2026-02', 1], [1, 0, '2026-03', 0], [1, limit, '2026-04', 1], [1, 0, '2026-05', 1],
+      [2, limit, '2026-01', 1], [2, 0, '2026-02', 1], [2, limit, '2026-03', 0], [2, 0, '2026-04', 1], [2, limit, '2026-05', 1],
+    ] as const) await f.db.runAsync("INSERT INTO price_history(product_id, price, source, effective_month, recorded_at, included) VALUES (?, ?, 'receipt', ?, '2026-10-09T08:00:00.000Z', ?)", productId, price, month, included);
+    const before = await storedState(f.db);
+    const [safe] = await grocery.getInflation(1, '2026-01', '2026-05');
+    assert.deepEqual([safe.increase, safe.referencePrice, safe.percentIncrease, safe.periodEndPrice], [9007199254740991, 0, null, 0]);
+    await assert.rejects(grocery.getInflation(1, '2026-01', '2026-04'), /safe amount limit/);
+    await assert.rejects(grocery.getInflation(2, '2026-01', '2026-04'), /safe amount limit/);
+    assert.deepEqual(await grocery.getInflation(2, '2026-01', '2026-05'), []);
+    for (const month of ['0000-01', '2026-13', '26-10', ' 2026-10']) await assert.rejects(grocery.getInflation(null, month, '2026-12'), /valid year and month/);
+    await assert.rejects(grocery.getInflation(null, '2026-02', '2026-01'), /start month/);
+    for (const category of [0, -1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) await assert.rejects(grocery.getInflation(category, '2026-01', '2026-05'), /valid saved record/);
+    assert.deepEqual(await grocery.getInflation(999, '0001-01', '9999-12'), []);
+    assert.deepEqual(await grocery.getInflation(null, '0001-01', '0001-01'), []);
+    assert.deepEqual(await storedState(f.db), before);
+  } finally { f.cleanup(); }
+});
+
+test('Inflation reads one coherent real-connection history and current-label snapshot, and failed reads retry without writes across reopening', async () => {
+  const f = await correctionFixture();
+  const other = open(f.path);
+  try {
+    await initializeDatabase(other.db);
+    const bytes = await codeBytes(f.db);
+    let changed = false;
+    const interleaved: Database = { ...f.db, async getAllAsync<T>(sql: string, ...params: SQLiteBindValue[]): Promise<T[]> {
+      const rows = await f.db.getAllAsync<T>(sql, ...params);
+      if (!changed) {
+        changed = true;
+        await other.db.withExclusiveTransactionAsync(async (tx) => {
+          await tx.execAsync("UPDATE price_history SET price = 3000 WHERE id = 12; UPDATE products SET name = 'Current milk' WHERE id = 1; UPDATE brands SET name = 'Current brand', name_key = 'current brand' WHERE id = 2; UPDATE stores SET name = 'Current store', name_key = 'current store' WHERE id = 2; UPDATE subcategories SET category_id = 2 WHERE id = 2;");
+        });
+      }
+      return rows;
+    } };
+    const [first] = await createGrocery(interleaved, now).getInflation(null, '2026-10', '2026-10');
+    assert.deepEqual([first.name, first.brand, first.categoryId, first.category, first.subcategory, first.increase, first.referencePrice, first.percentIncrease, first.periodEndPrice, first.points[0].store], ['Milk product', 'Marai', 1, 'Dairy', 'Yogurt', 500, 2000, 25, 2500, 'Catalog store']);
+    const grocery = createGrocery(f.db, now);
+    const [next] = await grocery.getInflation(null, '2026-10', '2026-10');
+    assert.deepEqual([next.name, next.brand, next.categoryId, next.category, next.subcategory, next.increase, next.referencePrice, next.percentIncrease, next.periodEndPrice, next.points[0].store], ['Current milk', 'Current brand', 2, 'Other', 'Yogurt', 1000, 2000, 50, 3000, 'Current store']);
+    const committed = await storedState(f.db);
+    await f.db.execAsync('ALTER TABLE price_history RENAME COLUMN price TO unavailable_price');
+    try { await assert.rejects(grocery.getInflation(null, '2026-10', '2026-10'), /no such column/); }
+    finally { await f.db.execAsync('ALTER TABLE price_history RENAME COLUMN unavailable_price TO price'); }
+    assert.deepEqual(await grocery.getInflation(null, '2026-10', '2026-10'), [next]);
+    assert.deepEqual(await storedState(f.db), committed);
+    assert.deepEqual(await codeBytes(f.db), bytes);
+    const reopened = open(f.path);
+    try {
+      await initializeDatabase(reopened.db);
+      assert.deepEqual(await createGrocery(reopened.db, now).getInflation(null, '2026-10', '2026-10'), [next]);
+      assert.deepEqual(await storedState(reopened.db), committed);
+      assert.deepEqual(await codeBytes(reopened.db), bytes);
+      assert.deepEqual(await reopened.db.getAllAsync('PRAGMA foreign_key_check'), []);
+      assert.deepEqual(await reopened.db.getFirstAsync('PRAGMA integrity_check'), { integrity_check: 'ok' });
+    } finally { reopened.close(); }
+  } finally { other.close(); f.cleanup(); }
+});

@@ -51,6 +51,11 @@ export type PriceObservation = {
   previousPrice: number | null; countedChange: number;
 };
 export type LinkedObservation = PriceObservation & { productId: number; product: string };
+export type InflationPoint = PriceObservation & { gapBefore: boolean };
+type InflationIdentity = ProductSummary & { categoryId: number; category: string; subcategory: string | null };
+export type InflationProduct = InflationIdentity & {
+  increase: number; referencePrice: number; percentIncrease: number | null; periodEndPrice: number; points: InflationPoint[];
+};
 export type ProductDetails = ProductSummary & {
   brandId: number | null; categoryId: number | null; category: string; subcategoryId: number | null; subcategory: string | null;
   savedPrice: number | null; savedStoreId: number | null; savedStore: string | null;
@@ -70,6 +75,7 @@ type ApplyOptions = { applyInflation?: boolean };
 type ObservationOwner = { id: number; productId: number; product: string; source: PriceObservation['source'] };
 type Receipt = { id: number; productId: number; storeId: number; month: string; purchaseDate: string | null; unitPrice: number };
 const max = BigInt(Number.MAX_SAFE_INTEGER);
+type ObservationRow = Omit<PriceObservation, 'baseline' | 'included' | 'previousPrice' | 'countedChange'> & { included: number };
 
 export function parseOMR(text: string): number {
   if (typeof text !== 'string' || !/^\d+(?:\.\d{1,3})?$/.test(text.trim())) throw new Error('Enter a nonnegative OMR price with up to three decimal places.');
@@ -217,12 +223,38 @@ async function writeSavedPrice(tx: Executor, product: ProductRow, update: SavedP
   await tx.runAsync('INSERT INTO price_history(product_id, price, store_id, source, effective_month, effective_date, recorded_at, included, source_purchase_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     product.id, price, storeId, 'saved_price', effectiveDate.slice(0, 7), effectiveDate, now.toISOString(), earlier && notInflation ? 0 : 1, update.kind === 'purchase' ? update.purchaseId : null);
 }
-async function readPriceHistory(db: Executor, productId: number): Promise<PriceObservation[]> {
-  const rows = await db.getAllAsync<Omit<PriceObservation, 'baseline' | 'included' | 'previousPrice' | 'countedChange'> & { included: number }>(`SELECT h.id, h.price, h.store_id AS storeId, s.name AS store, h.source,
-    h.effective_month AS effectiveMonth, h.effective_date AS effectiveDate, h.recorded_at AS recordedAt, h.included, h.source_purchase_id AS sourcePurchaseId
-    FROM price_history h LEFT JOIN stores s ON s.id = h.store_id WHERE h.product_id = ? ORDER BY h.effective_month, h.effective_date IS NULL, h.effective_date, h.id`, productId);
+function priceObservations(rows: ObservationRow[]): PriceObservation[] {
   return rows.map((row, position) => ({ ...row, included: row.included === 1, baseline: position === 0,
     previousPrice: rows[position - 1]?.price ?? null, countedChange: position === 0 || row.included === 0 ? 0 : row.price - rows[position - 1].price }));
+}
+async function readPriceHistory(db: Executor, productId: number): Promise<PriceObservation[]> {
+  const rows = await db.getAllAsync<ObservationRow>(`SELECT h.id, h.price, h.store_id AS storeId, s.name AS store, h.source,
+    h.effective_month AS effectiveMonth, h.effective_date AS effectiveDate, h.recorded_at AS recordedAt, h.included, h.source_purchase_id AS sourcePurchaseId
+    FROM price_history h LEFT JOIN stores s ON s.id = h.store_id WHERE h.product_id = ? ORDER BY h.effective_month, h.effective_date IS NULL, h.effective_date, h.id`, productId);
+  return priceObservations(rows);
+}
+function inflationProduct(product: InflationIdentity, history: PriceObservation[], startMonth: string, endMonth: string): InflationProduct | null {
+  let increase = 0n;
+  let referencePrice: number | null = null;
+  let periodEndPrice: number | null = null;
+  let gap = false;
+  const points: InflationPoint[] = [];
+  for (const observation of history) {
+    if (observation.effectiveMonth <= endMonth) periodEndPrice = observation.price;
+    if (observation.effectiveMonth < startMonth || observation.effectiveMonth > endMonth) continue;
+    if (!observation.baseline && observation.included) {
+      referencePrice ??= observation.previousPrice;
+      increase += BigInt(observation.countedChange);
+    }
+    if (!observation.baseline && !observation.included) { gap = true; continue; }
+    points.push({ ...observation, gapBefore: points.length > 0 && gap });
+    gap = false;
+  }
+  if (increase > max || increase < -max) throw new Error('The counted price change exceeds the safe amount limit. Choose a shorter range.');
+  if (increase <= 0n) return null;
+  const amount = Number(increase);
+  return { ...product, increase: amount, referencePrice: referencePrice!, percentIncrease: referencePrice === 0 ? null : amount / referencePrice! * 100,
+    periodEndPrice: periodEndPrice!, points };
 }
 function linkedObservation(db: Executor, purchaseId: number): Promise<ObservationOwner | null> {
   return db.getFirstAsync<ObservationOwner>(`SELECT h.id, h.product_id AS productId, p.name AS product, h.source
@@ -493,6 +525,35 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       });
     },
     getMonth(month: string) { return readMonth(db, validateMonth(month)); },
+    async getInflation(categoryIdOrNull: number | null, startMonth: string, endMonth: string): Promise<InflationProduct[]> {
+      validateMonth(startMonth);
+      validateMonth(endMonth);
+      if (startMonth > endMonth) throw new Error('The start month must be at or before the end month.');
+      const selectedCategory = categoryIdOrNull === null ? null : id(categoryIdOrNull);
+      const rows = await db.getAllAsync<ObservationRow & { productId: number; product: string; brand: string | null; archived: number; categoryId: number; category: string; subcategory: string | null }>(`SELECT
+        p.id AS productId, p.name AS product, b.name AS brand, p.archived, c.id AS categoryId, c.name AS category, sub.name AS subcategory,
+        h.id, h.price, h.store_id AS storeId, s.name AS store, h.source, h.effective_month AS effectiveMonth, h.effective_date AS effectiveDate,
+        h.recorded_at AS recordedAt, h.included, h.source_purchase_id AS sourcePurchaseId
+        FROM price_history h JOIN products p ON p.id = h.product_id LEFT JOIN brands b ON b.id = p.brand_id
+        LEFT JOIN subcategories sub ON sub.id = p.subcategory_id JOIN categories c ON c.id = COALESCE(p.category_id, sub.category_id)
+        LEFT JOIN stores s ON s.id = h.store_id WHERE (? IS NULL OR c.id = ?)
+        ORDER BY p.id, h.effective_month, h.effective_date IS NULL, h.effective_date, h.id`, selectedCategory, selectedCategory);
+      const products = new Map<number, { product: InflationIdentity; observations: ObservationRow[] }>();
+      for (const { productId, product, brand, archived, categoryId, category, subcategory, ...observation } of rows) {
+        let group = products.get(productId);
+        if (!group) {
+          group = { product: { id: productId, name: product, brand, archived: archived === 1, categoryId, category, subcategory }, observations: [] };
+          products.set(productId, group);
+        }
+        group.observations.push(observation);
+      }
+      const ranked: InflationProduct[] = [];
+      for (const group of products.values()) {
+        const result = inflationProduct(group.product, priceObservations(group.observations), startMonth, endMonth);
+        if (result) ranked.push(result);
+      }
+      return ranked.sort((a, b) => b.increase - a.increase || a.id - b.id);
+    },
     async listProductPurchases(productId: number): Promise<PurchaseRow[]> { return readPurchases(db, 'product_id', id(productId)); },
     async listReferences(): Promise<References> {
       const [brands, categories, stores, subcategories] = await Promise.all([
