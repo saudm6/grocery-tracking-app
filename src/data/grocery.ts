@@ -40,6 +40,7 @@ type SavedPriceUpdate =
   | { kind: 'purchase'; price: number; storeId: number; purchaseId: number; notInflation: boolean };
 export type ProductSummary = { id: number; name: string; brand: string | null; archived: boolean };
 export type SubcategoryDetails = SubcategoryRow & {
+  primaryBrandId: number | null; eligibleBrands: ReferenceRow[];
   products: ProductSummary[]; total: number;
   brands: { brandId: number | null; brand: string | null; total: number; products: { productId: number; product: string; total: number }[] }[];
 };
@@ -211,6 +212,10 @@ async function writeSavedPrice(tx: Executor, product: ProductRow, update: SavedP
   await tx.runAsync('INSERT INTO price_history(product_id, price, store_id, source, effective_month, effective_date, recorded_at, included, source_purchase_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     product.id, price, storeId, 'saved_price', effectiveDate.slice(0, 7), effectiveDate, now.toISOString(), earlier && notInflation ? 0 : 1, update.kind === 'purchase' ? update.purchaseId : null);
 }
+async function clearInvalidPrimaryBrands(tx: Executor) {
+  await tx.runAsync(`UPDATE subcategories SET primary_brand_id = NULL WHERE primary_brand_id IS NOT NULL AND NOT EXISTS
+    (SELECT 1 FROM products p WHERE p.subcategory_id = subcategories.id AND p.brand_id = subcategories.primary_brand_id AND p.archived = 0)`);
+}
 async function readMonth(db: Executor, month: string): Promise<MonthReport> {
   const entries = await db.getAllAsync<Omit<PurchaseRow, 'lineTotal'>>(`SELECT p.id, p.product_id AS productId, pr.name AS product, b.name AS brand,
     c.name AS category, sub.name AS subcategory, s.name AS store, p.month, p.purchase_date AS purchaseDate, p.quantity, p.unit_price AS unitPrice
@@ -241,6 +246,17 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       await exclusive(db, async (tx) => { savedId = await writeSubcategory(tx, input); });
       return savedId;
     },
+    async setPrimaryBrand(subcategoryId: number, brandIdOrNull: number | null): Promise<void> {
+      await exclusive(db, async (tx) => {
+        const selectedId = id(subcategoryId);
+        const brandId = brandIdOrNull === null ? null : id(brandIdOrNull);
+        if (!await tx.getFirstAsync('SELECT id FROM subcategories WHERE id = ?', selectedId)) throw new Error('This subcategory no longer exists.');
+        if (brandId !== null && !await tx.getFirstAsync('SELECT id FROM products WHERE subcategory_id = ? AND brand_id = ? AND archived = 0 LIMIT 1', selectedId, brandId)) {
+          throw new Error('Choose a brand with an active product in this subcategory.');
+        }
+        await tx.runAsync('UPDATE subcategories SET primary_brand_id = ? WHERE id = ?', brandId, selectedId);
+      });
+    },
     async saveProduct(input: ProductInput): Promise<number> {
       const label = name(input.name);
       const price = input.savedPrice === undefined || input.savedPrice.trim() === '' ? undefined : parseOMR(input.savedPrice);
@@ -258,6 +274,7 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
         } else {
           productId = (await tx.runAsync('INSERT INTO products(name, brand_id, category_id, subcategory_id) VALUES (?, ?, ?, ?)', label, brandId, categoryId, subcategoryId)).lastInsertRowId;
         }
+        await clearInvalidPrimaryBrands(tx);
         if (code) {
           const owner = await tx.getFirstAsync<{ product_id: number }>('SELECT product_id FROM product_codes WHERE namespace = ? AND canonical_key = CAST(? AS TEXT)', code.namespace, new TextEncoder().encode(code.key));
           if (owner && owner.product_id !== productId) throw new Error('That code belongs to another product, including archived products. Open its details.');
@@ -268,9 +285,12 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       });
       return productId;
     },
-    async listProducts(search = '', includeArchived = false): Promise<ProductSummary[]> {
+    async listProducts(search = '', includeArchived = false, subcategoryId: number | null = null): Promise<ProductSummary[]> {
+      const context = subcategoryId === null ? null : id(subcategoryId);
       const rows = await db.getAllAsync<Omit<ProductSummary, 'archived'> & { archived: number }>(`SELECT p.id, p.name, b.name AS brand, p.archived
-        FROM products p LEFT JOIN brands b ON b.id = p.brand_id WHERE (? = 1 OR p.archived = 0) ORDER BY p.name, p.id`, includeArchived);
+        FROM products p LEFT JOIN brands b ON b.id = p.brand_id LEFT JOIN subcategories sub ON sub.id = p.subcategory_id
+        WHERE (? = 1 OR p.archived = 0) AND (? IS NULL OR p.subcategory_id = ?)
+        ORDER BY CASE WHEN ? IS NOT NULL AND p.archived = 0 AND p.brand_id = sub.primary_brand_id THEN 0 ELSE 1 END, p.name, p.id`, includeArchived, context, context, context);
       const key = search.trim().normalize('NFKC').toLocaleLowerCase('en-US');
       return rows.filter((row) => referenceNameKey(row.name).includes(key)).map((row) => ({ ...row, archived: row.archived === 1 }));
     },
@@ -281,15 +301,17 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       return row ? { ...row, archived: row.archived === 1 } : null;
     },
     async getSubcategoryDetails(subcategoryId: number): Promise<SubcategoryDetails> {
-      const selected = await db.getFirstAsync<SubcategoryRow>(`SELECT sub.id, sub.name, sub.name_key AS nameKey, sub.category_id AS categoryId, c.name AS category
+      const selected = await db.getFirstAsync<SubcategoryRow & { primaryBrandId: number | null }>(`SELECT sub.id, sub.name, sub.name_key AS nameKey, sub.category_id AS categoryId, c.name AS category, sub.primary_brand_id AS primaryBrandId
         FROM subcategories sub JOIN categories c ON c.id = sub.category_id WHERE sub.id = ?`, id(subcategoryId));
       if (!selected) throw new Error('This subcategory no longer exists.');
-      const [members, purchases] = await Promise.all([
+      const [members, purchases, eligibleBrands] = await Promise.all([
         db.getAllAsync<Omit<ProductSummary, 'archived'> & { archived: number }>(`SELECT p.id, p.name, b.name AS brand, p.archived FROM products p
           LEFT JOIN brands b ON b.id = p.brand_id WHERE p.subcategory_id = ? ORDER BY p.name, p.id`, subcategoryId),
         db.getAllAsync<{ brandId: number | null; brand: string | null; productId: number; product: string; quantity: number; unitPrice: number }>(`SELECT p.brand_id AS brandId, b.name AS brand, p.product_id AS productId, pr.name AS product, p.quantity, p.unit_price AS unitPrice
           FROM purchases p JOIN products pr ON pr.id = p.product_id LEFT JOIN brands b ON b.id = p.brand_id
           WHERE p.subcategory_id = ? ORDER BY b.name, p.brand_id, pr.name, p.product_id, p.id`, subcategoryId),
+        db.getAllAsync<ReferenceRow>(`SELECT DISTINCT b.id, b.name, b.name_key AS nameKey FROM brands b JOIN products p ON p.brand_id = b.id
+          WHERE p.subcategory_id = ? AND p.archived = 0 ORDER BY b.name_key, b.id`, subcategoryId),
       ]);
       const groups = new Map<number | null, { brandId: number | null; brand: string | null; total: bigint; products: Map<number, { productId: number; product: string; total: bigint }> }>();
       let total = 0n;
@@ -304,7 +326,7 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
         product.total += amount;
       }
       if (total > max) throw new Error('Subcategory spending exceeds the safe amount limit.');
-      return { ...selected, products: members.map((product) => ({ ...product, archived: product.archived === 1 })), total: Number(total),
+      return { ...selected, eligibleBrands, products: members.map((product) => ({ ...product, archived: product.archived === 1 })), total: Number(total),
         brands: [...groups.values()].map((brand) => ({ ...brand, total: Number(brand.total), products: [...brand.products.values()].map((product) => ({ ...product, total: Number(product.total) })) })) };
     },
     async getProductDetails(productId: number): Promise<ProductDetails> {
@@ -328,6 +350,7 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
       await exclusive(db, async (tx) => {
         const result = await tx.runAsync('UPDATE products SET archived = ? WHERE id = ?', archived, id(productId));
         if (!result.changes) throw new Error('This product no longer exists.');
+        await clearInvalidPrimaryBrands(tx);
       });
     },
     async recordPurchase(input: PurchaseInput): Promise<number> {
