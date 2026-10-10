@@ -2,7 +2,7 @@ import { Stack } from 'expo-router/stack';
 import { GroceryProvider } from '../data/provider';
 
 export default function RootLayout() {
-  return <GroceryProvider><Stack>
+  return <GroceryProvider><Stack screenOptions={{ headerBackButtonDisplayMode: 'generic' }}>
     <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
     <Stack.Screen name="purchase" options={{ title: 'Add purchase' }} />
     <Stack.Screen name="purchase/[id]" options={{ title: 'Correct purchase' }} />

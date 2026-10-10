@@ -1,4 +1,4 @@
-import { Link, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, ScrollView, Text } from 'react-native';
 import { Action, ErrorMessage, Field } from '../../components/form';
@@ -28,7 +28,7 @@ export default function Home() {
     <Field label="Year and month (YYYY-MM)" value={draftMonth} onChangeText={setDraftMonth} autoCapitalize="none" autoCorrect={false} returnKeyType="done" onSubmitEditing={chooseMonth} />
     <Action label="Show month" onPress={chooseMonth} />
     {monthError ? <ErrorMessage message={monthError} /> : null}
-    <Link href="/spending" accessibilityLabel="Open Total Spending" style={{ fontSize: 18, color: '#21643c', paddingVertical: 12 }}>Open Total Spending</Link>
+    <Action label="Open Total Spending" onPress={() => router.push('/spending')} />
     {read.status === 'loading' ? <ActivityIndicator accessibilityLabel="Loading monthly analytics" /> : read.status === 'error' ? <>
       <ErrorMessage message={read.message} />
       <Text>Your month selection is kept. Retry to read the saved purchases.</Text>
