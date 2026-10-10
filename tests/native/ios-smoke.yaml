@@ -3,7 +3,7 @@ name: Offline manual purchase and persistent restart
 ---
 - launchApp:
     clearState: false
-- assertVisible: Home
+- assertVisible: 'Home, tab, 1 of 4'
 - assertVisible: 'Total Spending, tab, 2 of 4'
 - assertVisible: 'Inflation, tab, 3 of 4'
 - assertVisible: 'Catalog, tab, 4 of 4'
