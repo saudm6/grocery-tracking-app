@@ -31,14 +31,13 @@ function SubcategoryEditor({ record, references, readError, refresh, onSaved, on
     }
   };
   return <View style={{ gap: 16 }}>
-    <Text accessibilityRole="header" style={{ fontSize: 22 }}>{record ? `Rename ${record.name}` : 'Add subcategory'}</Text>
+    <Text accessibilityRole="header" style={{ fontSize: 22 }}>{record ? `Rename or move ${record.name}` : 'Add subcategory'}</Text>
     <Field label="Subcategory name" value={name} onChangeText={setName} editable={!saving} autoFocus returnKeyType="done" onSubmitEditing={() => { void save(); }} />
     <Text selectable>Parent category · {parent?.name ?? (parentId === null ? 'Choose a category' : 'Saved category unavailable')}</Text>
-    {record ? <Text>Renaming keeps this subcategory in its parent category.</Text> : <>
-      {references.categories.length ? <Action label={choosing ? 'Close parent category choices' : 'Choose parent category'} disabled={saving || !!readError} onPress={() => setChoosing((open) => !open)} /> : <Text>Add a category first. Your subcategory name stays here while you visit Categories.</Text>}
-      {choosing ? references.categories.map((category) => <Action key={category.id} label={`Use parent category ${category.name}`} disabled={saving || !!readError} onPress={() => { setParentId(category.id); setChoosing(false); }} />) : null}
-      <Action label="Manage parent categories" disabled={saving} onPress={() => router.push('/categories')} />
-    </>}
+    {record ? <Text>Moving changes the category for this subcategory’s current products and all purchases recorded under it. Inflation follows each product’s current group.</Text> : null}
+    {references.categories.length ? <Action label={choosing ? 'Close parent category choices' : 'Choose parent category'} disabled={saving || !!readError} onPress={() => setChoosing((open) => !open)} /> : <Text>Add a category first. Your subcategory name stays here while you visit Categories.</Text>}
+    {choosing ? references.categories.map((category) => <Action key={category.id} label={`Use parent category ${category.name}`} disabled={saving || !!readError} onPress={() => { setParentId(category.id); setChoosing(false); }} />) : null}
+    <Action label="Manage parent categories" disabled={saving} onPress={() => router.push('/categories')} />
     {error ? <ErrorMessage message={error} /> : null}
     <Action label={saving ? 'Saving subcategory…' : 'Save subcategory'} disabled={saving || !!readError} onPress={() => { void save(); }} />
     <Action label="Cancel subcategory edit" disabled={saving} onPress={onCancel} />
@@ -69,7 +68,7 @@ export default function Subcategories() {
         {references?.subcategories.length === 0 ? <Text>No subcategories yet. Add one here or enter a new subcategory while saving a product or purchase.</Text> : references?.subcategories.map((row) => <View key={row.id} style={{ padding: 16, gap: 8, borderWidth: 1, borderColor: '#657469', borderRadius: 10, backgroundColor: '#fff' }}>
           <Text selectable style={{ fontSize: 20, color: '#17251b' }}>{row.category} / {row.name}</Text>
           <Action label={`Open subcategory ${row.category} / ${row.name}`} disabled={!!readError} onPress={() => router.push({ pathname: '/subcategory/[id]', params: { id: row.id } })} />
-          <Action label={`Rename subcategory ${row.category} / ${row.name}`} disabled={!!readError} onPress={() => { setNotice(''); setEditor(row); }} />
+          <Action label={`Rename or move subcategory ${row.category} / ${row.name}`} disabled={!!readError} onPress={() => { setNotice(''); setEditor(row); }} />
         </View>)}
       </>}
     </ScrollView>
