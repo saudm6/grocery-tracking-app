@@ -28,6 +28,7 @@ export default function Purchase() {
   const [grouping, setGrouping] = useState<Grouping>({ category: { name: '' } });
   const [brand, setBrand] = useState<Reference>({ name: '' });
   const [store, setStore] = useState<Reference>({ name: '' });
+  const [notInflation, setNotInflation] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [references, setReferences] = useState<References | null>(null);
@@ -64,12 +65,14 @@ export default function Purchase() {
     setDraft((previous) => ({ ...previous, [key]: value }));
   };
   const chooseProduct = (id: number) => {
-    if (id !== selectedId) { readId.current++; setSelection({ kind: 'known', id, details: null }); }
+    if (id !== selectedId) { readId.current++; setNotInflation(false); setSelection({ kind: 'known', id, details: null }); }
     setChoosingProduct(false);
   };
-  const chooseNew = () => { identifier.current?.cancelIdentification(); readId.current++; initializedProduct.current = null; setSelection({ kind: 'new' }); setChoosingProduct(false); };
+  const chooseNew = () => { identifier.current?.cancelIdentification(); readId.current++; initializedProduct.current = null; setNotInflation(false); setSelection({ kind: 'new' }); setChoosingProduct(false); };
   let preview = '';
   try { preview = `${formatOMR(lineTotal(parseQuantity(draft.quantity), parseOMR(draft.price)))} OMR`; } catch {}
+  let canExclude = false;
+  try { canExclude = readState === 'ready' && draft.month === localDate().slice(0, 7) && !!product?.canExcludeSavedPrice && !product.archived && parseOMR(draft.price) !== product.savedPrice; } catch {}
   const save = async () => {
     try {
       await submit(async () => {
@@ -77,7 +80,7 @@ export default function Purchase() {
         if (!references || readState !== 'ready' || (selectedId !== null && !product)) throw new Error('Wait for purchase choices to load.');
         setError('');
         const result = await grocery.recordPurchase({ product: selectedId === null ? { name: draft.name, brand: brand.id !== undefined || brand.name.trim() ? brand : null, grouping } : { id: selectedId }, store,
-          month: draft.month, purchaseDate: draft.date.trim(), quantity: draft.quantity, unitPrice: draft.price });
+          month: draft.month, purchaseDate: draft.date.trim(), quantity: draft.quantity, unitPrice: draft.price, notInflation: canExclude && notInflation });
         router.back();
         return result;
       });
@@ -113,6 +116,7 @@ export default function Purchase() {
       <Field label="Purchase date (optional, YYYY-MM-DD)" value={draft.date} onChangeText={set('date')} editable={editing} autoCapitalize="none" autoCorrect={false} returnKeyType="done" />
       <Text selectable>Line total · {preview || 'Enter a valid price and quantity'}</Text>
       <Text>A first or changed current-month price updates the saved price and store. An unchanged price keeps saved defaults. Older receipts affect spending only.</Text>
+      {canExclude ? <><Text>This price has an earlier observation. Choose its inflation status before saving.</Text><Action label={notInflation ? 'Not inflation selected · switch to Included' : 'Included in inflation · mark Not inflation'} disabled={!editing} onPress={() => setNotInflation((excluded) => !excluded)} /></> : null}
       {error ? <ErrorMessage message={error} /> : null}
       {readState === 'error' ? <><ErrorMessage message={readError} /><Action label="Retry purchase choices" onPress={refresh} /></> : null}
       <Action label={readState === 'loading' ? 'Loading purchase choices…' : saving ? 'Saving purchase…' : 'Save purchase'} disabled={!editing || !!routeError || readState !== 'ready' || !!product?.archived} onPress={() => { void save(); }} />
