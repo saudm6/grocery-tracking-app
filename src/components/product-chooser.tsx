@@ -4,7 +4,7 @@ import { ActivityIndicator, Text } from 'react-native';
 import { Action, ErrorMessage, Field } from './form';
 import { ProductRow } from './product-row';
 import type { CodeFormat, CodeInput } from '../data/code';
-import type { ProductSummary } from '../data/grocery';
+import type { ProductSummary, SubcategoryRow } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 
 const formats: { value: CodeFormat; label: string }[] = [
@@ -13,8 +13,10 @@ const formats: { value: CodeFormat; label: string }[] = [
 ];
 type Lookup = { status: 'idle' | 'loading' } | { status: 'ready'; product: ProductSummary | null } | { status: 'error'; message: string };
 
-export function ProductChooser({ month, onChoose, disabled }: { month: string; onChoose: (id: number) => void; disabled: boolean }) {
+export function ProductChooser({ month, subcategories, onChoose, disabled }: { month: string; subcategories: SubcategoryRow[]; onChoose: (id: number) => void; disabled: boolean }) {
   const grocery = useGrocery();
+  const [subcategoryId, setSubcategoryId] = useState<number | null>(null);
+  const [choosingSubcategory, setChoosingSubcategory] = useState(false);
   const [search, setSearch] = useState('');
   const [includeArchived, setIncludeArchived] = useState(false);
   const [rows, setRows] = useState<ProductSummary[] | null>(null);
@@ -29,10 +31,10 @@ export function ProductChooser({ month, onChoose, disabled }: { month: string; o
   const refresh = useCallback(() => {
     const request = ++listReadId.current;
     setRows(null);
-    void grocery.listProducts(search, includeArchived).then((products) => { if (listReadId.current === request) { setRows(products); setError(''); } })
+    void grocery.listProducts(search, includeArchived, subcategoryId).then((products) => { if (listReadId.current === request) { setRows(products); setError(''); } })
       .catch(() => { if (listReadId.current === request) setError('Could not read saved products. Your entries are kept. Retry.'); });
     return () => { listReadId.current++; };
-  }, [grocery, search, includeArchived]);
+  }, [grocery, search, includeArchived, subcategoryId]);
   useFocusEffect(refresh);
   const resolveCode = useCallback((input: CodeInput) => {
     const request = ++lookupReadId.current;
@@ -50,6 +52,11 @@ export function ProductChooser({ month, onChoose, disabled }: { month: string; o
     lastLookup.current = { format, value: code };
     resolveCode(lastLookup.current);
   };
+  const selectedSubcategory = subcategories.find((row) => row.id === subcategoryId);
+  const chooseSubcategory = (id: number | null) => {
+    if (id !== subcategoryId) { listReadId.current++; setRows(null); setSubcategoryId(id); }
+    setChoosingSubcategory(false);
+  };
   const result = (product: ProductSummary) => <ProductRow key={product.id} product={product}>
     {product.archived ? <>
       <Text>Reactivate this existing product from details before selecting it.</Text>
@@ -57,6 +64,14 @@ export function ProductChooser({ month, onChoose, disabled }: { month: string; o
     </> : <Action label={`Use product ${product.name} · Product ${product.id}`} disabled={disabled} onPress={() => onChoose(product.id)} />}
   </ProductRow>;
   return <>
+    <Text selectable>Manual subcategory · {subcategoryId === null ? 'All saved products' : selectedSubcategory ? `${selectedSubcategory.category} / ${selectedSubcategory.name}` : `Saved subcategory ${subcategoryId} unavailable`}</Text>
+    <Action label={choosingSubcategory ? 'Close manual subcategory choices' : 'Choose manual subcategory'} disabled={disabled} onPress={() => setChoosingSubcategory((open) => !open)} />
+    {choosingSubcategory ? <>
+      <Action label="Use all saved products" disabled={disabled} onPress={() => chooseSubcategory(null)} />
+      {subcategories.map((row) => <Action key={row.id} label={`Use products from ${row.category} / ${row.name}`} disabled={disabled} onPress={() => chooseSubcategory(row.id)} />)}
+    </> : null}
+    {subcategoryId !== null && !selectedSubcategory ? <ErrorMessage message="This saved subcategory is unavailable. Retry purchase choices or choose another manual context." /> : null}
+    <Text>A subcategory&apos;s current primary brand comes first in manual choices. Choose the exact product. Changing these choices keeps your selected product and purchase entries.</Text>
     <Field label="Search saved product names" value={search} onChangeText={(value) => { listReadId.current++; setRows(null); setSearch(value); }} editable={!disabled} autoCorrect={false} returnKeyType="search" />
     <Action label={includeArchived ? 'Hide archived products' : 'Show archived products'} disabled={disabled} onPress={() => { listReadId.current++; setRows(null); setIncludeArchived((shown) => !shown); }} />
     {error ? <><ErrorMessage message={error} /><Action label="Retry saved products" disabled={disabled} onPress={refresh} /></> : rows === null ? <ActivityIndicator accessibilityLabel="Loading saved products" /> : null}
