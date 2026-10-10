@@ -58,6 +58,10 @@ export type PurchaseRow = {
   id: number; productId: number; product: string; brand: string | null; category: string; subcategory: string | null;
   store: string; month: string; purchaseDate: string | null; quantity: number; unitPrice: number; lineTotal: number;
 };
+export type PurchaseDetails = PurchaseRow & { brandId: number | null; categoryId: number | null; subcategoryId: number | null; storeId: number };
+export type PurchaseCorrection = {
+  productId: number; store: Reference; grouping?: Grouping; month: string; purchaseDate?: string | null; quantity: string; unitPrice: string;
+};
 export type MonthReport = { month: string; purchases: PurchaseRow[]; total: number };
 const max = BigInt(Number.MAX_SAFE_INTEGER);
 
@@ -356,6 +360,51 @@ export function createGrocery(db: Database, clock: () => Date = () => new Date()
         await readMonth(tx, month);
       });
       return purchaseId;
+    },
+    async getPurchase(purchaseId: number): Promise<PurchaseDetails> {
+      const purchase = await db.getFirstAsync<Omit<PurchaseDetails, 'lineTotal'>>(`SELECT p.id, p.product_id AS productId, pr.name AS product,
+        p.brand_id AS brandId, b.name AS brand, p.category_id AS categoryId, c.name AS category, p.subcategory_id AS subcategoryId,
+        sub.name AS subcategory, p.store_id AS storeId, s.name AS store, p.month, p.purchase_date AS purchaseDate, p.quantity, p.unit_price AS unitPrice
+        FROM purchases p JOIN products pr ON pr.id = p.product_id LEFT JOIN brands b ON b.id = p.brand_id
+        JOIN stores s ON s.id = p.store_id LEFT JOIN subcategories sub ON sub.id = p.subcategory_id
+        JOIN categories c ON c.id = COALESCE(p.category_id, sub.category_id) WHERE p.id = ?`, id(purchaseId));
+      if (!purchase) throw new Error('This purchase no longer exists.');
+      return { ...purchase, lineTotal: lineTotal(purchase.quantity, purchase.unitPrice) };
+    },
+    async updatePurchase(purchaseId: number, input: PurchaseCorrection): Promise<void> {
+      const month = validateMonth(input.month);
+      const purchaseDate = validateDate(input.purchaseDate, month);
+      const quantity = parseQuantity(input.quantity);
+      const price = parseOMR(input.unitPrice);
+      lineTotal(quantity, price);
+      await exclusive(db, async (tx) => {
+        const purchase = await tx.getFirstAsync<{ product_id: number; brand_id: number | null; category_id: number | null; subcategory_id: number | null; month: string }>(
+          'SELECT product_id, brand_id, category_id, subcategory_id, month FROM purchases WHERE id = ?', id(purchaseId));
+        if (!purchase) throw new Error('This purchase no longer exists.');
+        const productId = id(input.productId);
+        let brandId = purchase.brand_id;
+        if (productId !== purchase.product_id) {
+          const product = await tx.getFirstAsync<ProductRow>('SELECT * FROM products WHERE id = ?', productId);
+          if (!product || product.archived) throw new Error('Select an active replacement product.');
+          if (input.grouping === undefined) throw new Error('Confirm the replacement product grouping.');
+          brandId = product.brand_id;
+        }
+        const { categoryId, subcategoryId } = input.grouping === undefined
+          ? { categoryId: purchase.category_id, subcategoryId: purchase.subcategory_id } : await resolveGrouping(tx, input.grouping);
+        const storeId = await reference(tx, 'stores', input.store);
+        await tx.runAsync('UPDATE purchases SET product_id = ?, brand_id = ?, store_id = ?, category_id = ?, subcategory_id = ?, month = ?, purchase_date = ?, quantity = ?, unit_price = ? WHERE id = ?',
+          productId, brandId, storeId, categoryId, subcategoryId, month, purchaseDate, quantity, price, purchaseId);
+        await readMonth(tx, purchase.month);
+        if (month !== purchase.month) await readMonth(tx, month);
+      });
+    },
+    async deletePurchase(purchaseId: number): Promise<void> {
+      await exclusive(db, async (tx) => {
+        const purchase = await tx.getFirstAsync<{ month: string }>('SELECT month FROM purchases WHERE id = ?', id(purchaseId));
+        if (!purchase) throw new Error('This purchase no longer exists.');
+        await tx.runAsync('DELETE FROM purchases WHERE id = ?', purchaseId);
+        await readMonth(tx, purchase.month);
+      });
     },
     getMonth(month: string) { return readMonth(db, validateMonth(month)); },
     async listReferences(): Promise<References> {
