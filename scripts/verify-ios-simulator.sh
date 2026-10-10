@@ -30,6 +30,70 @@ guard_restore() {
   fi
 }
 
+loopback_probe() {
+  local phase="$1" seconds="${2:-2}" code=1 http=000 elapsed=0 alive=0 identity=0
+  if kill -0 "$loopback_pid" 2>/dev/null; then
+    alive=1
+    if curl --noproxy '*' --fail --silent --show-error --connect-timeout 2 --max-time "$seconds" \
+      --max-filesize 128 --output "$state/$phase-loopback-body.txt" --write-out '%{http_code} %{time_total}\n' \
+      "$loopback_url/identity.txt" > "$state/$phase-loopback-transfer.txt" 2> "$state/$phase-loopback-error.txt"; then code=0; else code=$?; fi
+    read -r http elapsed < "$state/$phase-loopback-transfer.txt" || true
+    if [[ "$code" == 0 && "$http" == 200 ]] && cmp -s "$state/loopback/identity.txt" "$state/$phase-loopback-body.txt"; then
+      identity=1
+    elif [[ "$code" == 0 ]]; then code=1; fi
+  else printf 'Owned loopback server is not live.\n' > "$state/$phase-loopback-error.txt"; fi
+  printf '%s %s loopback %s\n' "$(date -u '+%FT%TZ')" "$phase" "$code" >> "$state/probes.log" || return 1
+  printf '[loopback-probe] phase=%s pid=%s live=%s curlExit=%s http=%s elapsed=%s identity=%s\n' \
+    "$phase" "$loopback_pid" "$alive" "$code" "$http" "$elapsed" "$identity" | tee -a "$state/loopback-probes.log" || return 1
+  if [[ "$code" != 0 ]]; then
+    failure_tail "$phase-loopback" "$state/$phase-loopback-error.txt"
+    [[ ! -f "$state/loopback.log" ]] || failure_tail loopback-server "$state/loopback.log"
+  fi
+  return "$code"
+}
+
+wait_loopback() {
+  local deadline=$((SECONDS + $1)) remaining
+  while (( SECONDS < deadline )); do
+    remaining=$((deadline - SECONDS))
+    if loopback_probe readiness "$((remaining < 2 ? remaining : 2))"; then return 0; fi
+    kill -0 "$loopback_pid" 2>/dev/null || return 1
+    sleep 0.2
+  done
+  return 1
+}
+
+start_loopback() {
+  local port="$1" seconds="$2" nonce
+  mkdir -p "$state/loopback" || return 1
+  nonce="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" || return 1
+  printf '%s-%s\n' "$EXPECTED_SHA" "$nonce" > "$state/loopback/identity.txt" || return 1
+  loopback_url="http://127.0.0.1:$port"
+  python3 -u -m http.server "$port" --bind 127.0.0.1 --directory "$state/loopback" > "$state/loopback.log" 2>&1 &
+  loopback_pid=$!
+  wait_loopback "$seconds"
+}
+
+stop_loopback() {
+  [[ -n "$loopback_pid" ]] || return 0
+  local status=0 failed=0
+  if kill -0 "$loopback_pid" 2>/dev/null; then
+    kill -KILL "$loopback_pid" 2>/dev/null || failed=1
+  fi
+  if [[ "$failed" == 0 ]]; then
+    if wait "$loopback_pid"; then status=0; else status=$?; fi
+    [[ "$status" != 127 ]] || failed=1
+    if kill -0 "$loopback_pid" 2>/dev/null; then failed=1; fi
+  fi
+  if [[ "$failed" == 0 ]]; then touch "$state/loopback-waited" || failed=1; fi
+  printf '[loopback-cleanup] pid=%s waitedStatus=%s failed=%s\n' "$loopback_pid" "$status" "$failed" | tee "$state/loopback-cleanup.txt" || failed=1
+  if [[ "$failed" != 0 ]]; then
+    printf 'Loopback server cleanup not proved: pid=%s status=%s\n' "$loopback_pid" "$status" >> "$evidence/command-cleanup-failed"
+    return 1
+  fi
+  loopback_pid=''
+}
+
 probe() {
   local phase="$1" expectation="$2" label url code
   for label in github apple ipv4; do
@@ -48,7 +112,7 @@ probe() {
     if [[ "$expectation" == online ]]; then [[ "$code" == 0 ]] || return 1; else [[ "$code" != 0 ]] || return 1; fi
   fi
   if [[ -n "$loopback_pid" ]]; then
-    curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:9187/ > /dev/null
+    loopback_probe "$phase"
   fi
 }
 
@@ -206,7 +270,9 @@ if [[ "${1:-}" == --self-test ]]; then
   [[ "$(wc -l < "$test_dir/restored-interfaces" | tr -d ' ')" == 4 ]]
   mkdir "$test_dir/recovered" "$test_dir/persistent" "$test_dir/probe-failure" "$test_dir/early"
   printf 'en0\n' | tee "$test_dir/recovered/interfaces" "$test_dir/persistent/interfaces" > "$test_dir/probe-failure/interfaces"
-  state="$test_dir/recovered" loopback_pid=mock probe_fails=0 restore_calls=0
+  state="$test_dir/recovered" loopback_pid=mock loopback_url=http://127.0.0.1:9187 probe_fails=0 restore_calls=0
+  mkdir "$state/loopback"
+  printf 'fixture identity\n' > "$state/loopback/identity.txt"
   touch "$test_dir/loopback-alive"
   interface_up() {
     restore_calls="$(cat "$test_dir/restore-calls" 2>/dev/null || printf 0)"
@@ -218,9 +284,13 @@ if [[ "${1:-}" == --self-test ]]; then
     if [[ "$*" == *127.0.0.1* ]]; then
       [[ -f "$test_dir/loopback-alive" && -f "$state/restored" ]] || return 1
       printf 'loopback after restore\n' >> "$test_dir/probe-events"
+      while [[ "$1" != --output ]]; do shift; done
+      cp "$state/loopback/identity.txt" "$2"
+      printf '200 0.001\n'
     fi
     [[ "$probe_fails" == 0 ]]
   }
+  kill() { if [[ "$*" == '-0 mock' ]]; then return 0; else builtin kill "$@"; fi; }
   guard_restore "$state" 1 &
   recovery_pid=$!
   prove_restoration "$state" 1 3
@@ -239,6 +309,7 @@ if [[ "${1:-}" == --self-test ]]; then
   prove_restoration "$state" 0 1
   [[ -f "$state/restoration-proven" && ! -f "$state/restored" ]]
   [[ "$(wc -l < "$test_dir/probe-events" | tr -d ' ')" == 1 ]]
+  unset -f kill
   evidence="$test_dir"
   run_stage fixture-success 5 "$(python3 -c 'import sys; print(sys.executable)')" -c 'print("full diagnostic retained")'
   grep -q '^full diagnostic retained' "$evidence/fixture-success.log"
@@ -398,7 +469,96 @@ finally:
         original_popen.wait(cleanup_child)
 PY
   [[ ! -f "$evidence/command-cleanup-failed" ]]
-  printf 'Helper self-test passed: restore/probe failure paths, timed recovery/live loopback, early diagnostics, retained stage logs/exit status, real-child signal and deadline cleanup. No host interface commands ran.\n'
+  python3 - "${BASH_SOURCE[0]}" "$test_dir" "$BASH" <<'PY'
+import pathlib, shlex, socket, subprocess, sys, time
+source = pathlib.Path(sys.argv[1]).read_text()
+prefix = source.split('if [[ "${1:-}" == --self-test ]]', 1)[0]
+root = pathlib.Path(sys.argv[2])
+fixture = root / 'loopback-server.py'
+fixture.write_text('''import functools, http.server, pathlib, sys, time
+state, port, mode = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+if mode == 'dead': raise SystemExit(0)
+if mode == 'delayed':
+    deadline = time.monotonic() + 5
+    while not (state/'loopback-probes.log').exists() or 'identity=0' not in (state/'loopback-probes.log').read_text():
+        if time.monotonic() >= deadline: raise SystemExit(1)
+        time.sleep(0.02)
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if mode == 'timeout': time.sleep(10)
+        if mode in ('wrong', 'timeout'):
+            body = b'wrong identity\\n'
+            self.send_response(200); self.send_header('Content-Length', str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+        else: super().do_GET()
+with http.server.ThreadingHTTPServer(('127.0.0.1', port), functools.partial(Handler, directory=str(state/'loopback'))) as server:
+    server.serve_forever()
+''')
+def free_port():
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        return listener.getsockname()[1]
+for mode in ('immediate', 'delayed', 'dead', 'wrong', 'timeout', 'competitor', 'SIGINT', 'SIGTERM'):
+    directory = root / f'loopback-{mode}'
+    directory.mkdir(); (directory/'loopback').mkdir()
+    (directory/'loopback/identity.txt').write_text('fixture identity\n')
+    port = free_port()
+    setup = f'''evidence={shlex.quote(directory.as_posix())}
+state="$evidence" loopback_pid='' EXPECTED_SHA={'0'*40}
+loopback_url=http://127.0.0.1:{port}
+trap 'stop_loopback || exit 1' EXIT
+'''
+    owned = f'python3 -u {shlex.quote(fixture.as_posix())} "$state" {port}'
+    if mode in ('immediate', 'SIGINT', 'SIGTERM'):
+        body = f'start_loopback {port} 5\n'
+    else:
+        selected = 'wrong' if mode == 'competitor' else mode
+        body = f'{owned} {selected} > "$state/loopback.log" 2>&1 &\nloopback_pid=$!\n'
+    if mode in ('immediate', 'delayed'):
+        body += 'wait_loopback 5\nfor phase in before during completed after; do loopback_probe "$phase"; done\n'
+    elif mode in ('dead', 'wrong', 'timeout'):
+        body += 'if wait_loopback 3; then exit 1; fi\n'
+        if mode == 'wrong':
+            body += '''curl() { if [[ "$*" == *127.0.0.1* ]]; then command curl "$@"; elif [[ "$expectation" == offline ]]; then return 28; fi; }
+for phase in before during completed; do expectation=online; [[ "$phase" == before ]] || expectation=offline; if probe "$phase" "$expectation"; then exit 1; fi; done
+if prove_restoration "$state" 0 1; then exit 1; fi
+[[ ! -f "$state/restoration-proven" ]]
+'''
+        if mode == 'timeout': body += 'if loopback_probe before; then exit 1; else [[ "$?" == 28 ]]; fi\n'
+    elif mode == 'competitor':
+        body += '''competitor_pid="$loopback_pid"
+trap 'stop_loopback || true; kill -KILL "$competitor_pid" 2>/dev/null || true; wait "$competitor_pid" 2>/dev/null || true' EXIT
+sleep 0.5
+'''
+        body += f'if start_loopback {port} 3; then exit 1; fi\nstop_loopback\nkill -0 "$competitor_pid"\n'
+        body += 'kill -KILL "$competitor_pid"\nwait "$competitor_pid" 2>/dev/null || true\ntrap - EXIT\n'
+    else:
+        signum, code = (2, 130) if mode == 'SIGINT' else (15, 143)
+        body += f'''trap 'exit {code}' {'INT' if signum == 2 else 'TERM'}
+trap 'primary=$?; stop_loopback || exit 1; wait "$cancel_pid"; exit "$primary"' EXIT
+(sleep 0.2; kill -{signum} "$$") &
+cancel_pid=$!
+while true; do sleep 0.1; done
+'''
+    script = directory / 'fixture.sh'
+    script.write_text(prefix + setup + body, encoding='utf-8', newline='\n')
+    started = time.monotonic()
+    result = subprocess.run([sys.argv[3], script.as_posix()], capture_output=True, text=True, timeout=20)
+    (directory/'console.txt').write_text(result.stdout + result.stderr)
+    expected = 130 if mode == 'SIGINT' else 143 if mode == 'SIGTERM' else 0
+    assert result.returncode == expected, (mode, result.returncode, result.stdout, result.stderr)
+    assert (directory/'loopback-waited').exists(), (mode, 'owned server not waited')
+    assert not (directory/'command-cleanup-failed').exists(), (mode, 'cleanup denied')
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=0.2):
+            raise AssertionError(f'{mode}: owned listener survived cleanup')
+    except OSError: pass
+    if mode in ('wrong', 'competitor'): assert 'identity=0' in result.stdout
+    if mode == 'delayed': assert 'identity=0' in result.stdout and 'identity=1' in result.stdout
+    if mode == 'timeout': assert 'curlExit=28' in result.stdout
+    print(f'Loopback/{mode}: exit={result.returncode}, owned server waited, elapsed={time.monotonic()-started:.2f}s')
+PY
+  printf 'Helper self-test passed: restore/probe failure paths, timed recovery/live loopback, early diagnostics, retained stage logs/exit status, real-child signal/deadline cleanup, owned identity/readiness/cancellation. No host interface commands ran.\n'
   exit 0
 fi
 
@@ -430,7 +590,7 @@ if [[ "${1:-}" == --cache-preflight ]]; then
 fi
 
 cleanup() {
-  local result=$? cache_kib network_proven=0 primary_result safe_upload=0 cache_save_ok=0
+  local result=$? cache_kib network_proven=0 primary_result safe_upload=0 cache_save_ok=0 loopback_cleanup_proven=1
   primary_result="$result"
   trap - EXIT INT TERM
   printf '[cleanup-entry] primaryExit=%s stage=%s offlineStarted=%s\n' "$primary_result" "$active_stage" "$offline_started"
@@ -442,13 +602,13 @@ cleanup() {
   if [[ -n "$guard_pid" && ( "$offline_started" == 0 || -f "$state/restored" ) ]]; then
     kill "$guard_pid" 2>/dev/null || true
   fi
-  if [[ -n "$loopback_pid" ]]; then kill "$loopback_pid" 2>/dev/null || true; fi
+  if ! stop_loopback; then result=1; loopback_cleanup_proven=0; fi
   if [[ -n "$udid" ]]; then
     bounded_run 30 xcrun simctl io "$udid" screenshot "$evidence/final-screen.png" > "$evidence/cleanup-screenshot.log" 2>&1 || failure_tail cleanup-screenshot "$evidence/cleanup-screenshot.log"
     bounded_run 60 xcrun simctl shutdown "$udid" > "$evidence/cleanup-shutdown.log" 2>&1 || failure_tail cleanup-shutdown "$evidence/cleanup-shutdown.log"
   fi
   driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
-  if [[ "$network_proven" == 1 && ! -f "$evidence/command-cleanup-failed" ]]; then
+  if [[ "$network_proven" == 1 && "$loopback_cleanup_proven" == 1 && ! -f "$evidence/command-cleanup-failed" ]]; then
     safe_upload=1
     if [[ -d "$compiler_cache" ]] && cache_kib="$(du -sk "$compiler_cache" | awk '{print $1}')"; then
       printf 'directory=%s\nsizeKiB=%s\n' "$compiler_cache" "$cache_kib" > "$evidence/compiler-cache-size.txt"
@@ -458,7 +618,7 @@ cleanup() {
     fi
   else result=1; fi
   if [[ "$result" != 0 ]]; then passed=false; fi
-  if EXPECTED_SHA="$EXPECTED_SHA" EVIDENCE="$evidence" PASSED="$passed" RESULT="$result" PRIMARY_RESULT="$primary_result" OFFLINE_STARTED="$offline_started" UDID="$udid" ACTIVE_STAGE="$active_stage" python3 - <<'PY'
+  if EXPECTED_SHA="$EXPECTED_SHA" EVIDENCE="$evidence" PASSED="$passed" RESULT="$result" PRIMARY_RESULT="$primary_result" OFFLINE_STARTED="$offline_started" UDID="$udid" ACTIVE_STAGE="$active_stage" LOOPBACK_CLEANUP_PROVEN="$loopback_cleanup_proven" python3 - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ['EVIDENCE'])
 receipt = {'sourceSHA': os.environ['EXPECTED_SHA'], 'workflowSHA': os.getenv('GITHUB_WORKFLOW_SHA'),
@@ -471,7 +631,10 @@ receipt = {'sourceSHA': os.environ['EXPECTED_SHA'], 'workflowSHA': os.getenv('GI
            'networkRestorationProven': (p/'network/restoration-proven').exists(),
            'ownedCommandCleanupFailed': (p/'command-cleanup-failed').exists(),
            'ownedCommandCleanupDetails': (p/'command-cleanup-failed').read_text()[-4096:] if (p/'command-cleanup-failed').exists() else None,
-           'safeToUpload': (p/'network/restoration-proven').exists() and not (p/'command-cleanup-failed').exists(),
+           'loopbackServerWaited': (p/'network/loopback-waited').exists(),
+           'loopbackServerCleanupProven': os.environ['LOOPBACK_CLEANUP_PROVEN'] == '1',
+           'loopbackProbeTail': (p/'network/loopback-probes.log').read_text().splitlines()[-8:] if (p/'network/loopback-probes.log').exists() else [],
+           'safeToUpload': (p/'network/restoration-proven').exists() and os.environ['LOOPBACK_CLEANUP_PROVEN'] == '1' and not (p/'command-cleanup-failed').exists(),
            'networkWithdrawn': os.getenv('OFFLINE_STARTED') == '1',
            'networkProbeTail': (p/'network/probes.log').read_text().splitlines()[-8:] if (p/'network/probes.log').exists() else [],
            'timedGuardFired': (p/'network/guard-fired').exists(),
@@ -561,6 +724,8 @@ else
   driver_logs || printf '[driver-diagnostic] log capture failed\n' >&2
   exit "$driver_result"
 fi
+active_stage=loopback-readiness
+start_loopback 9187 30
 build_args=(-workspace "$workspace" -scheme "$scheme" -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=$udid" -derivedDataPath "$RUNNER_TEMP/grocery-ios-derived" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO COMPILER_INDEX_STORE_ENABLE=NO ONLY_ACTIVE_ARCH=YES COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES)
 active_stage=build-settings
 bounded_run 300 xcodebuild "${build_args[@]}" -showBuildSettings -json > "$evidence/build-settings.json"
@@ -598,9 +763,7 @@ xcrun simctl install "$udid" "$app"
 installed="$(xcrun simctl get_app_container "$udid" com.saudm6.grocerytracker app)"
 cmp "$app/main.jsbundle" "$installed/main.jsbundle"
 
-python3 -m http.server 9187 --bind 127.0.0.1 --directory "$tools_dir" > "$state/loopback.log" 2>&1 &
-loopback_pid=$!
-sleep 1
+active_stage=before-offline
 probe before online
 if curl --noproxy '*' --silent --head --connect-timeout 2 --max-time 5 'http://[2606:4700:4700::1111]' > "$state/before-ipv6.txt" 2>&1; then
   touch "$state/ipv6-available"
