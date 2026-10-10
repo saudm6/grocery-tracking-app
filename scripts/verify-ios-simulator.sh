@@ -63,13 +63,45 @@ wait_loopback() {
   return 1
 }
 
+loopback_server_program() {
+  cat <<'PY'
+print('[loopback-server] phase=bootstrap', flush=True)
+import faulthandler
+faulthandler.dump_traceback_later(2)
+import functools, http.server, socketserver, sys
+print('[loopback-server] phase=imports', flush=True)
+
+class NumericServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        print('[loopback-server] phase=bind', flush=True)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = '127.0.0.1', self.server_address[1]
+        print('[loopback-server] phase=bound', flush=True)
+
+    def server_activate(self):
+        print('[loopback-server] phase=listen', flush=True)
+        super().server_activate()
+        faulthandler.cancel_dump_traceback_later()
+        print('[loopback-server] phase=listening', flush=True)
+
+def serve(handler, port):
+    with NumericServer(('127.0.0.1', port), handler) as server:
+        print('[loopback-server] phase=serve', flush=True)
+        server.serve_forever()
+
+if __name__ == '__main__':
+    serve(functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1]), int(sys.argv[2]))
+PY
+}
+
 start_loopback() {
   local port="$1" seconds="$2" nonce
   mkdir -p "$state/loopback" || return 1
   nonce="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" || return 1
   printf '%s-%s\n' "$EXPECTED_SHA" "$nonce" > "$state/loopback/identity.txt" || return 1
+  loopback_server_program > "$state/loopback-server.py" || return 1
   loopback_url="http://127.0.0.1:$port"
-  python3 -u -m http.server "$port" --bind 127.0.0.1 --directory "$state/loopback" > "$state/loopback.log" 2>&1 &
+  python3 -u "$state/loopback-server.py" "$state/loopback" "$port" > "$state/loopback.log" 2>&1 &
   loopback_pid=$!
   wait_loopback "$seconds"
 }
@@ -470,13 +502,48 @@ finally:
 PY
   [[ ! -f "$evidence/command-cleanup-failed" ]]
   python3 - "${BASH_SOURCE[0]}" "$test_dir" "$BASH" <<'PY'
-import pathlib, shlex, socket, subprocess, sys, time
+import functools, http.server, pathlib, shlex, socket, subprocess, sys, threading, time
 source = pathlib.Path(sys.argv[1]).read_text()
 prefix = source.split('if [[ "${1:-}" == --self-test ]]', 1)[0]
 root = pathlib.Path(sys.argv[2])
+program = source.split("loopback_server_program() {\n  cat <<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+policy_file = root / 'loopback-policy.py'
+policy_file.write_text(program, encoding='utf-8', newline='\n')
+original_resolvers = {name: getattr(socket, name) for name in ('getfqdn', 'gethostbyaddr', 'gethostbyname', 'gethostbyname_ex', 'getaddrinfo', 'getnameinfo')}
+resolver_calls = []
+def deny_resolver(*args, **kwargs):
+    resolver_calls.append(args)
+    raise AssertionError('Loopback server attempted hostname resolution')
+server = worker = None
+try:
+    for name in original_resolvers: setattr(socket, name, deny_resolver)
+    namespace = {'__name__': 'loopback_policy'}
+    exec(compile(program, policy_file.as_posix(), 'exec'), namespace)
+    resolver_dir = root / 'resolver-denial'; resolver_dir.mkdir()
+    (resolver_dir/'identity.txt').write_bytes(b'resolver-free identity\n')
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(resolver_dir))
+    server = namespace['NumericServer'](('127.0.0.1', 0), handler)
+    assert server.server_name == '127.0.0.1'
+    worker = threading.Thread(target=server.serve_forever); worker.start()
+    with socket.socket() as client:
+        client.settimeout(2); client.connect(server.server_address)
+        client.sendall(b'GET /identity.txt HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n')
+        response = b''
+        while chunk := client.recv(4096): response += chunk
+    assert b' 200 ' in response.split(b'\r\n', 1)[0] and response.endswith(b'resolver-free identity\n'), response
+    assert not resolver_calls, resolver_calls
+finally:
+    if server is not None:
+        if worker is not None: server.shutdown(); worker.join(2); assert not worker.is_alive()
+        server.server_close()
+    for name, function in original_resolvers.items(): setattr(socket, name, function)
+    namespace.get('faulthandler', __import__('faulthandler')).cancel_dump_traceback_later()
+print('Loopback/resolver-denial: numeric startup and real identity request passed; resolver calls=0; server closed and thread waited')
 fixture = root / 'loopback-server.py'
-fixture.write_text('''import functools, http.server, pathlib, sys, time
+fixture.write_text('''import pathlib, runpy, sys, time
 state, port, mode = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+policy = runpy.run_path(sys.argv[4])
+http, functools = policy['http'], policy['functools']
 if mode == 'dead': raise SystemExit(0)
 if mode == 'delayed':
     deadline = time.monotonic() + 5
@@ -491,8 +558,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Length', str(len(body)))
             self.end_headers(); self.wfile.write(body)
         else: super().do_GET()
-with http.server.ThreadingHTTPServer(('127.0.0.1', port), functools.partial(Handler, directory=str(state/'loopback'))) as server:
-    server.serve_forever()
+policy['serve'](functools.partial(Handler, directory=str(state/'loopback')), port)
 ''')
 def free_port():
     with socket.socket() as listener:
@@ -513,7 +579,7 @@ trap 'stop_loopback || exit 1' EXIT
         body = f'start_loopback {port} 5\n'
     else:
         selected = 'wrong' if mode == 'competitor' else mode
-        body = f'{owned} {selected} > "$state/loopback.log" 2>&1 &\nloopback_pid=$!\n'
+        body = f'{owned} {selected} {shlex.quote(policy_file.as_posix())} > "$state/loopback.log" 2>&1 &\nloopback_pid=$!\n'
     if mode in ('immediate', 'delayed'):
         body += 'wait_loopback 5\nfor phase in before during completed after; do loopback_probe "$phase"; done\n'
     elif mode in ('dead', 'wrong', 'timeout'):
@@ -528,7 +594,12 @@ if prove_restoration "$state" 0 1; then exit 1; fi
     elif mode == 'competitor':
         body += '''competitor_pid="$loopback_pid"
 trap 'stop_loopback || true; kill -KILL "$competitor_pid" 2>/dev/null || true; wait "$competitor_pid" 2>/dev/null || true' EXIT
-sleep 0.5
+deadline=$((SECONDS + 5))
+until grep -q 'phase=serve' "$state/loopback.log"; do
+  kill -0 "$competitor_pid" || exit 1
+  (( SECONDS < deadline )) || exit 1
+  sleep 0.02
+done
 '''
         body += f'if start_loopback {port} 3; then exit 1; fi\nstop_loopback\nkill -0 "$competitor_pid"\n'
         body += 'kill -KILL "$competitor_pid"\nwait "$competitor_pid" 2>/dev/null || true\ntrap - EXIT\n'
@@ -556,6 +627,11 @@ while true; do sleep 0.1; done
     if mode in ('wrong', 'competitor'): assert 'identity=0' in result.stdout
     if mode == 'delayed': assert 'identity=0' in result.stdout and 'identity=1' in result.stdout
     if mode == 'timeout': assert 'curlExit=28' in result.stdout
+    server_log = (directory/'loopback.log').read_text()
+    assert 'phase=bootstrap' in server_log and 'phase=imports' in server_log, (mode, server_log)
+    if mode in ('immediate', 'delayed', 'wrong', 'timeout', 'SIGINT', 'SIGTERM'):
+        for phase in ('bind', 'bound', 'listen', 'listening', 'serve'):
+            assert f'phase={phase}\n' in server_log, (mode, phase, server_log)
     print(f'Loopback/{mode}: exit={result.returncode}, owned server waited, elapsed={time.monotonic()-started:.2f}s')
 PY
   printf 'Helper self-test passed: restore/probe failure paths, timed recovery/live loopback, early diagnostics, retained stage logs/exit status, real-child signal/deadline cleanup, owned identity/readiness/cancellation. No host interface commands ran.\n'
