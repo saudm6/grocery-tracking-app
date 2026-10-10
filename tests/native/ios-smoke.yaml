@@ -27,7 +27,12 @@ name: Offline manual purchase and persistent restart
     text: Category
     index: 1
 - inputText: IOSSmokeDairy
-- hideKeyboard
+- tapOn:
+    text: Category
+    index: 0
+- assertNotVisible:
+    id: UIKeyboardLayoutStar Preview
+- assertVisible: IOSSmokeDairy
 - scrollUntilVisible:
     element:
       text: Store
