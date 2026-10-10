@@ -92,7 +92,7 @@ function PurchaseEditor({ purchase, references, readReady, refresh, onCommitted 
     <Text>Corrections affect spending only. Saved product defaults and every price observation stay unchanged.</Text>
     <Field label="Purchase month (YYYY-MM)" value={draft.month} onChangeText={set('month')} editable={editing} autoCapitalize="none" autoCorrect={false} />
     <Action label={choosingProduct ? 'Close saved product choices' : 'Change purchased product'} disabled={!editing} onPress={() => setChoosingProduct((open) => !open)} />
-    {choosingProduct ? <ProductChooser month={draft.month} onChoose={chooseProduct} disabled={saving || confirmingDelete} /> : null}
+    {choosingProduct ? <ProductChooser month={draft.month} subcategories={references.subcategories} onChoose={chooseProduct} disabled={saving || confirmingDelete} /> : null}
     <Text selectable accessibilityRole="header" style={{ fontSize: 22 }}>{selectedId === null ? purchase.product : product?.name ?? 'Loading replacement product…'} · Product {selectedId ?? purchase.productId}</Text>
     <Text selectable>{selectedId === null ? 'Recorded brand' : 'Replacement brand'} · {selectedId === null ? purchase.brand ?? 'No brand' : product?.brand ?? 'No brand'}</Text>
     {selectedId === null ? <Text>Keep the recorded product and brand, including an archived product. Its grouping stays recorded unless you correct it below.</Text> : <>
