@@ -1,6 +1,7 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text } from 'react-native';
+import { CodeScanner } from '../components/code-scanner';
 import { Action, ErrorMessage, Field } from '../components/form';
 import { GroupingField } from '../components/grouping-field';
 import { ReferenceField } from '../components/reference-field';
@@ -35,13 +36,15 @@ function ProductEditor({ product, references, readError, refresh, month, initial
   useFocusEffect(useCallback(() => () => { ownerReadId.current++; }, []));
   const submit = useRef(createSubmission(setSaving)).current;
   const clearOwner = () => { ownerReadId.current++; setOwner(null); setOwnerError(''); };
-  const checkOwner = () => {
+  const current: CodeInput | null = format === 'none' ? null : { format, value: code };
+  const checkOwner = (input: CodeInput | null) => {
     const request = ++ownerReadId.current;
-    if (format === 'none') return;
-    void grocery.lookupCode({ format, value: code }).then((found) => {
+    if (input === null) return;
+    void grocery.lookupCode(input).then((found) => {
       if (ownerReadId.current === request) { setOwner(found && found.id !== product?.id ? found : null); setOwnerError(''); }
     }).catch(() => { if (ownerReadId.current === request) setOwnerError('Could not look up this code. Check the format and value, or retry.'); });
   };
+  const scanned = (input: CodeInput) => { clearOwner(); setFormat(input.format); setCode(input.value); setChoosingFormat(false); checkOwner(input); };
   let canExclude = false;
   try { canExclude = !!product?.canExcludeSavedPrice && !!price.trim() && parseOMR(price) !== product.savedPrice; } catch {}
   const save = async () => {
@@ -51,7 +54,7 @@ function ProductEditor({ product, references, readError, refresh, month, initial
         clearOwner();
         const productId = await grocery.saveProduct({ id: product?.id, name, brand: brand.id !== undefined || brand.name.trim() ? brand : null, grouping,
           savedPrice: price, savedStore: store.id !== undefined || store.name.trim() ? store : null,
-          code: format === 'none' ? undefined : { format, value: code }, notInflation: canExclude && notInflation });
+          code: current ?? undefined, notInflation: canExclude && notInflation });
         const monthParam = month === undefined ? {} : { month };
         router.dismissTo(fromPurchase ? { pathname: '/purchase', params: { productId, ...monthParam } } : { pathname: '/product/[id]', params: { id: productId, ...monthParam } });
         return productId;
@@ -59,7 +62,7 @@ function ProductEditor({ product, references, readError, refresh, month, initial
     } catch (failure) {
       setError(`${failure instanceof Error ? failure.message : 'Could not save the product.'} Your entries are kept. Correct them or retry.`);
       refresh();
-      checkOwner();
+      checkOwner(current);
     }
   };
   const editing = !saving && !product?.archived;
@@ -77,6 +80,7 @@ function ProductEditor({ product, references, readError, refresh, month, initial
     <Action label="Use no saved store" disabled={!editing} onPress={() => setStore({ name: '' })} />
     {canExclude ? <><Text>This changed price has an earlier observation. Choose its inflation status before saving.</Text><Action label={notInflation ? 'Not inflation selected · switch to Included' : 'Included in inflation · mark Not inflation'} disabled={!editing} onPress={() => setNotInflation((excluded) => !excluded)} /></> : null}
     <Text>{product?.codes.length ? `${product.codes.length} existing ${product.codes.length === 1 ? 'code remains' : 'codes remain'} on this product. You can add another.` : 'A product code is optional.'}</Text>
+    <CodeScanner label="Scan code" onCapture={scanned} disabled={!editing} />
     <Action label={`Code format · ${formats.find((choice) => choice.value === format)!.label} · Change`} disabled={!editing} onPress={() => setChoosingFormat((open) => !open)} />
     {choosingFormat ? formats.map((choice) => <Action key={choice.value} label={`Use ${choice.label}`} disabled={!editing} onPress={() => { clearOwner(); setFormat(choice.value); setChoosingFormat(false); }} />) : null}
     {format !== 'none' ? <>
@@ -84,7 +88,7 @@ function ProductEditor({ product, references, readError, refresh, month, initial
       {format === 'qr' ? <Text selectable>QR preview · {JSON.stringify(code)}</Text> : <Text>Enter all digits without spaces or separators. UPC-E needs its full 8 digits.</Text>}
     </> : null}
     {owner ? <><Text>This code identifies {owner.name}{owner.archived ? ' · Archived. Reactivate its existing identity from details.' : '.'}</Text><Action label={`Open code owner ${owner.name}`} onPress={() => router.push({ pathname: '/product/[id]', params: { id: owner.id, ...(month === undefined ? {} : { month }) } })} /></> : null}
-    {ownerError ? <><ErrorMessage message={ownerError} /><Action label="Retry code owner lookup" onPress={checkOwner} /></> : null}
+    {ownerError ? <><ErrorMessage message={ownerError} /><Action label="Retry code owner lookup" onPress={() => checkOwner(current)} /></> : null}
     {error ? <ErrorMessage message={error} /> : null}
     <Action label={saving ? 'Saving product…' : 'Save product'} disabled={!editing || !!readError} onPress={() => { void save(); }} />
   </>;
