@@ -8,6 +8,7 @@ export default function RootLayout() {
     <Stack.Screen name="purchase/[id]" options={{ title: 'Correct purchase' }} />
     <Stack.Screen name="brands" options={{ title: 'Brands' }} />
     <Stack.Screen name="stores" options={{ title: 'Stores' }} />
+    <Stack.Screen name="backup" options={{ title: 'Backup' }} />
     <Stack.Screen name="categories" options={{ title: 'Categories' }} />
     <Stack.Screen name="subcategories" options={{ title: 'Subcategories' }} />
     <Stack.Screen name="subcategory/[id]" options={{ title: 'Subcategory details' }} />
