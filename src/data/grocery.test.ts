@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { backup, DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import type { SQLiteBindValue } from 'expo-sqlite';
-import { backupFileName, importBackup } from './backup';
+import { BackupError, backupFileName, importBackup } from './backup';
 import { cameraCode, handedOffCode, handOffCode, normalizeCode, type CodeInput } from './code';
-import { createGrocery, formatOMR, initializeDatabase, lineTotal, parseOMR, parseQuantity, referenceNameKey, validateDate, validateMonth, type Database, type Executor, type Grouping, type ProductInput, type PurchaseCorrection, type PurchaseInput } from './grocery';
+import { createGrocery, formatOMR, initializeDatabase, lineTotal, parseOMR, parseQuantity, referenceNameKey, storageBusy, storageFailed, validateDate, validateMonth, type Database, type Executor, type Grouping, type ProductInput, type PurchaseCorrection, type PurchaseInput } from './grocery';
 import { migrations } from './schema';
 import { createSubmission } from './submission';
 
@@ -49,6 +49,13 @@ async function fixture(versions: readonly string[] = migrations) {
   return { db, path, close, cleanup: () => { close(); rmSync(folder, { recursive: true }); } };
 }
 const now = () => new Date(2026, 9, 9, 12);
+// Grocery calls show one plain sentence for a SQLite error and keep the original as `cause`.
+const storage = (cause: RegExp, message = storageFailed) => (error: unknown) => {
+  assert.ok(error instanceof Error);
+  assert.equal(error.message, message);
+  assert.match(String(error.cause), cause);
+  return true;
+};
 const input = (changes: Partial<PurchaseInput> = {}): PurchaseInput => ({
   product: { name: 'Milk', brand: { name: 'Mazoon' }, grouping: { category: { name: 'Dairy' } } },
   store: { name: 'Local store' }, month: '2026-10', quantity: '3', unitPrice: '0.001', ...changes,
@@ -114,7 +121,7 @@ test('inline creation rolls back after failure, rejects normalized duplicates, a
   try {
     const grocery = createGrocery(f.db, now);
     await f.db.execAsync("CREATE TRIGGER reject_purchase BEFORE INSERT ON purchases BEGIN SELECT RAISE(ABORT, 'injected failure'); END;");
-    await assert.rejects(grocery.recordPurchase(input()), /injected failure/);
+    await assert.rejects(grocery.recordPurchase(input()), storage(/injected failure/));
     for (const table of ['brands', 'categories', 'stores', 'products', 'purchases', 'price_history']) assert.equal((await f.db.getAllAsync(`SELECT * FROM ${table}`)).length, 0, table);
     await f.db.execAsync('DROP TRIGGER reject_purchase');
     await grocery.recordPurchase(input());
@@ -212,7 +219,7 @@ test('failed brand and store renames roll back their labels and linked writes, t
     await grocery.recordPurchase(input());
     for (const table of ['brands', 'stores'] as const) {
       await f.db.execAsync(`CREATE TRIGGER reject_rename AFTER UPDATE ON ${table} BEGIN UPDATE purchases SET unit_price = 9; SELECT RAISE(ABORT, 'injected rename failure'); END;`);
-      await assert.rejects(table === 'brands' ? grocery.saveBrand({ id: 1, name: 'Corrected brand' }) : grocery.saveStore({ id: 1, name: 'Corrected store' }), /injected rename failure/);
+      await assert.rejects(table === 'brands' ? grocery.saveBrand({ id: 1, name: 'Corrected brand' }) : grocery.saveStore({ id: 1, name: 'Corrected store' }), storage(/injected rename failure/));
       assert.deepEqual(await grocery.listReferences(), { brands: [{ id: 1, name: 'Mazoon', nameKey: 'mazoon' }], stores: [{ id: 1, name: 'Local store', nameKey: 'local store' }], categories: [{ id: 1, name: 'Dairy', nameKey: 'dairy' }], subcategories: [] });
       assert.equal((await grocery.getMonth('2026-10')).total, 3);
       assert.deepEqual(await f.db.getFirstAsync('SELECT id, product_id, brand_id, store_id, quantity, unit_price FROM purchases'), { id: 1, product_id: 1, brand_id: 1, store_id: 1, quantity: 3, unit_price: 1 });
@@ -318,7 +325,7 @@ test('exclusive setup failure in the no-write gap remains retryable with existin
         await tx.execAsync(sql);
       } }));
     } };
-    await assert.rejects(initializeDatabase(faulty), /no transaction is active/);
+    await assert.rejects(initializeDatabase(faulty), storage(/injected setup failure/));
     await initializeDatabase(f.db);
     assert.equal((await createGrocery(f.db, now).getMonth('2026-10')).total, 3);
   } finally { f.cleanup(); }
@@ -416,7 +423,7 @@ test('product paid lists retain recorded amounts and identity through catalog ed
     await assert.rejects(grocery.listProductPurchases(0), /valid saved record/);
     assert.deepEqual(await storedState(f.db), beforeRead);
     await f.db.execAsync('ALTER TABLE purchases RENAME COLUMN unit_price TO unavailable_price');
-    try { await assert.rejects(grocery.listProductPurchases(1), /no such column/); }
+    try { await assert.rejects(grocery.listProductPurchases(1), storage(/no such column/)); }
     finally { await f.db.execAsync('ALTER TABLE purchases RENAME COLUMN unavailable_price TO unit_price'); }
     assert.deepEqual(await grocery.listProductPurchases(1), expected);
     assert.deepEqual(await storedState(f.db), beforeRead);
@@ -592,7 +599,7 @@ test('late correction and deletion failures roll back fully, retry once through 
     await f.db.execAsync("CREATE TRIGGER reject_correction AFTER UPDATE ON purchases WHEN NEW.id = 1 BEGIN UPDATE products SET saved_price = 999, saved_store_id = 1; UPDATE price_history SET price = 999, included = 1; UPDATE purchases SET unit_price = 99 WHERE id = 2; SELECT RAISE(ABORT, 'late correction failure'); END");
     const pending: boolean[] = [];
     const submit = createSubmission((value) => pending.push(value));
-    await assert.rejects(submit(() => grocery.updatePurchase(1, draft)), /late correction failure/);
+    await assert.rejects(submit(() => grocery.updatePurchase(1, draft)), storage(/late correction failure/));
     assert.deepEqual(await storedState(f.db), before);
     assert.deepEqual(await codeBytes(f.db), bytes);
     assert.equal(draft.quantity, '3');
@@ -612,13 +619,13 @@ test('late correction and deletion failures roll back fully, retry once through 
     assert.deepEqual(committed.products, before.products);
     assert.deepEqual(committed.price_history, before.price_history);
     await f.db.execAsync('ALTER TABLE purchases RENAME COLUMN unit_price TO unreadable_price');
-    await assert.rejects(grocery.getMonth('2026-09'), /no such column/);
+    await assert.rejects(grocery.getMonth('2026-09'), storage(/no such column/));
     await f.db.execAsync('ALTER TABLE purchases RENAME COLUMN unreadable_price TO unit_price');
     assert.equal((await grocery.getMonth('2026-09')).total, 6000);
     assert.deepEqual(await storedState(f.db), committed);
     await f.db.execAsync("CREATE TRIGGER reject_deletion AFTER DELETE ON purchases WHEN OLD.id = 1 BEGIN UPDATE products SET saved_price = 999; UPDATE price_history SET price = 999, included = 1; SELECT RAISE(ABORT, 'late deletion failure'); END");
     const remove = createSubmission();
-    await assert.rejects(remove(() => grocery.deletePurchase(1)), /late deletion failure/);
+    await assert.rejects(remove(() => grocery.deletePurchase(1)), storage(/late deletion failure/));
     assert.deepEqual(await storedState(f.db), committed);
     await f.db.execAsync('DROP TRIGGER reject_deletion');
     await Promise.all([remove(() => grocery.deletePurchase(1)), remove(() => grocery.deletePurchase(1))]);
@@ -679,7 +686,7 @@ test('categories and parent-scoped subcategories share name rules and stable tra
     assert.deepEqual(await storedState(f.db), baseline);
     for (const table of ['categories', 'subcategories']) {
       await f.db.execAsync(`CREATE TRIGGER rename_failure AFTER UPDATE ON ${table} BEGIN UPDATE purchases SET unit_price = 99; SELECT RAISE(ABORT, 'rename failure'); END`);
-      await assert.rejects(table === 'categories' ? grocery.saveCategory({ id: 1, name: 'Dairy corrected' }) : grocery.saveSubcategory({ id: 1, name: 'Milk corrected', parentCategoryId: 1 }), /rename failure/);
+      await assert.rejects(table === 'categories' ? grocery.saveCategory({ id: 1, name: 'Dairy corrected' }) : grocery.saveSubcategory({ id: 1, name: 'Milk corrected', parentCategoryId: 1 }), storage(/rename failure/));
       assert.deepEqual(await storedState(f.db), baseline);
       await f.db.execAsync('DROP TRIGGER rename_failure');
     }
@@ -718,8 +725,8 @@ test('catalog and purchase inline grouping drafts commit completely or roll back
     assert.deepEqual(await storedState(f.db), baseline);
     await f.db.execAsync("CREATE TRIGGER history_failure AFTER INSERT ON price_history BEGIN UPDATE purchases SET unit_price = 99; SELECT RAISE(ABORT, 'history failure'); END");
     const grouped = { name: 'New product', brand: { name: 'New brand' }, grouping: { subcategory: { name: 'New child', parentCategory: { name: 'New parent' } } } };
-    await assert.rejects(grocery.saveProduct(catalog({ ...grouped, savedStore: { name: 'New store' }, savedPrice: '3.000', code: { format: 'qr', value: 'New QR' } })), /history failure/);
-    await assert.rejects(grocery.recordPurchase(input({ product: grouped, store: { name: 'New store' }, quantity: '2', unitPrice: '3.000' })), /history failure/);
+    await assert.rejects(grocery.saveProduct(catalog({ ...grouped, savedStore: { name: 'New store' }, savedPrice: '3.000', code: { format: 'qr', value: 'New QR' } })), storage(/history failure/));
+    await assert.rejects(grocery.recordPurchase(input({ product: grouped, store: { name: 'New store' }, quantity: '2', unitPrice: '3.000' })), storage(/history failure/));
     assert.deepEqual(await storedState(f.db), baseline);
     await f.db.execAsync('DROP TRIGGER history_failure');
     await grocery.recordPurchase(input({ product: { name: 'Known grouping', grouping: { subcategory: { id: 1 } } }, store: { id: 1 }, quantity: '2', unitPrice: '2.000' }));
@@ -995,7 +1002,7 @@ test('failed known purchase rolls back paid changes and inline store, then the r
     await f.db.execAsync("CREATE TRIGGER reject_repeat BEFORE INSERT ON purchases BEGIN UPDATE purchases SET unit_price = 999 WHERE id = 1; SELECT RAISE(ABORT, 'known purchase failure'); END;");
     const submit = createSubmission();
     const draft = input({ product: { id: 1 }, store: { name: 'New paid store' }, unitPrice: '2.500', quantity: '1' });
-    await assert.rejects(submit(() => grocery.recordPurchase(draft)), /known purchase failure/);
+    await assert.rejects(submit(() => grocery.recordPurchase(draft)), storage(/known purchase failure/));
     assert.deepEqual(await Promise.all(tables.map((table) => f.db.getAllAsync(`SELECT * FROM ${table} ORDER BY id`))), before);
     await f.db.execAsync('DROP TRIGGER reject_repeat');
     await Promise.all([submit(() => grocery.recordPurchase(draft)), submit(() => grocery.recordPurchase(draft))]);
@@ -1096,7 +1103,7 @@ test('a late known price-history failure rolls back every table and the retained
     const pending: boolean[] = [];
     const submit = createSubmission((value) => pending.push(value));
     const draft = input({ product: { id: 1 }, store: { name: 'Retained paid store' }, quantity: '2', unitPrice: '24.000', purchaseDate: '2026-10-05', notInflation: true });
-    const failed = assert.rejects(submit(() => grocery.recordPurchase(draft)), /late known history failure/);
+    const failed = assert.rejects(submit(() => grocery.recordPurchase(draft)), storage(/late known history failure/));
     assert.equal(await submit(async () => { assert.fail('Suppressed purchase ran'); }), undefined);
     assert.deepEqual(pending, [true]);
     await failed;
@@ -1387,7 +1394,7 @@ test('code ownership is canonical, separate for QR, exact for Unicode/NUL, and r
     await assert.rejects(grocery.saveProduct(catalog({ name: 'Must roll back', brand: { name: 'Must roll back brand' }, grouping: { category: { name: 'Must roll back category' } }, savedStore: { name: 'Must roll back store' }, savedPrice: '3', code: { format: 'upc_a', value: '012345000058' } })), /belongs to another/);
     assert.deepEqual(await Promise.all(tables.map((table) => f.db.getAllAsync(`SELECT * FROM ${table} ORDER BY id`))), before);
     await f.db.execAsync("CREATE TRIGGER reject_catalog_history BEFORE INSERT ON price_history BEGIN UPDATE products SET name = 'corrupt'; SELECT RAISE(ABORT, 'history failure'); END;");
-    await assert.rejects(grocery.saveProduct({ ...edit, name: 'Changed', brand: { name: 'Transient brand' }, savedStore: { name: 'Transient store' }, savedPrice: '0.002', code: { format: 'qr', value: 'Transient QR' } }), /history failure/);
+    await assert.rejects(grocery.saveProduct({ ...edit, name: 'Changed', brand: { name: 'Transient brand' }, savedStore: { name: 'Transient store' }, savedPrice: '0.002', code: { format: 'qr', value: 'Transient QR' } }), storage(/history failure/));
     assert.deepEqual(await Promise.all(tables.map((table) => f.db.getAllAsync(`SELECT * FROM ${table} ORDER BY id`))), before);
     await f.db.execAsync('DROP TRIGGER reject_catalog_history');
     for (const change of [{ id: 999 }, { id: 0 }, { brand: { id: 999 } }, { grouping: { category: { id: 999 } } }, { savedStore: { id: 999 } }, { savedPrice: '1.0001' }, { grouping: { category: { name: ' DAIRY ' } } }]) await assert.rejects(grocery.saveProduct({ ...edit, ...change }));
@@ -1653,14 +1660,14 @@ test('subcategory moves reject stale collisions and locks, roll back late faults
     const valid = await storedState(f.db);
     await f.db.withExclusiveTransactionAsync(async (tx) => {
       await tx.runAsync('UPDATE brands SET name = name WHERE id = 1');
-      await assert.rejects(peer.saveSubcategory(draft), /locked|no transaction is active/);
+      await assert.rejects(peer.saveSubcategory(draft), storage(/locked/, storageBusy));
     });
     assert.deepEqual(await storedState(f.db), valid);
     await f.db.execAsync("CREATE TRIGGER reject_move AFTER UPDATE OF category_id ON subcategories BEGIN UPDATE subcategories SET primary_brand_id = NULL WHERE id = 1; UPDATE products SET saved_price = 888; UPDATE purchases SET unit_price = 9; UPDATE price_history SET included = 0; UPDATE brands SET name = 'Corrupt'; UPDATE product_codes SET original_code = 'Corrupt'; SELECT RAISE(ABORT, 'late move failure'); END;");
     const pending: boolean[] = [];
     const submit = createSubmission((value) => pending.push(value));
     try {
-      await assert.rejects(submit(() => grocery.saveSubcategory(draft)), /late move failure/);
+      await assert.rejects(submit(() => grocery.saveSubcategory(draft)), storage(/late move failure/));
       assert.deepEqual(draft, { id: 1, name: 'Milk', parentCategoryId: 2 });
       assert.deepEqual(pending, [true, false]);
       assert.deepEqual(await storedState(f.db), valid);
@@ -1677,7 +1684,7 @@ test('subcategory moves reject stale collisions and locks, roll back late faults
     assert.deepEqual([...(await grocery.getSubcategoryDetails(1)).products.map((row) => row.id), (await grocery.getSubcategoryDetails(1)).primaryBrandId], [1, 2, 1]);
     const committed = await storedState(f.db);
     const failedRead: Database = { ...f.db, async getAllAsync() { throw new Error('injected move read failure'); } };
-    await assert.rejects(createGrocery(failedRead, now).getHomeAnalytics('2026-09'), /move read failure/);
+    await assert.rejects(createGrocery(failedRead, now).getHomeAnalytics('2026-09'), storage(/move read failure/));
     assert.deepEqual((await grocery.getHomeAnalytics('2026-09')).categories, [{ id: 2, name: 'Chilled', total: 5500 }, { id: 1, name: 'Dairy', total: 500 }]);
     assert.deepEqual(await storedState(f.db), committed);
     assert.deepEqual(await codeBytes(f.db), bytes);
@@ -1862,7 +1869,7 @@ test('Home reads one literal paid view across a real second-connection commit an
       return f.db.getAllAsync<T>(sql, ...params);
     } };
     const grocery = createGrocery(failing, now);
-    await assert.rejects(grocery.getHomeAnalytics('2026-10'), /owned read failure/);
+    await assert.rejects(grocery.getHomeAnalytics('2026-10'), storage(/owned read failure/));
     assert.deepEqual(await grocery.getHomeAnalytics('2026-10'), current);
     assert.deepEqual(await storedState(f.db), before);
     assert.deepEqual(await f.db.getAllAsync('PRAGMA foreign_key_check'), []);
@@ -2062,7 +2069,7 @@ test('receipt INSERT, combined correction, flag and combined deletion failures r
       const pending: boolean[] = [];
       const submit = createSubmission((value) => pending.push(value));
       await f.db.execAsync(scenario.trigger);
-      try { await assert.rejects(submit(scenario.command), /late receipt failure/); }
+      try { await assert.rejects(submit(scenario.command), storage(/late receipt failure/)); }
       finally { await f.db.execAsync('DROP TRIGGER receipt_fault'); }
       assert.deepEqual(await storedState(f.db), before);
       assert.deepEqual(await codeBytes(f.db), bytes);
@@ -2080,7 +2087,7 @@ test('receipt INSERT, combined correction, flag and combined deletion failures r
       await scenario.expected();
       const committed = await storedState(f.db);
       await f.db.execAsync('ALTER TABLE price_history RENAME COLUMN price TO unavailable_price');
-      try { await assert.rejects(grocery.getProductDetails(1), /no such column/); }
+      try { await assert.rejects(grocery.getProductDetails(1), storage(/no such column/)); }
       finally { await f.db.execAsync('ALTER TABLE price_history RENAME COLUMN unavailable_price TO price'); }
       await grocery.getProductDetails(1);
       assert.deepEqual(await storedState(f.db), committed);
@@ -2241,7 +2248,7 @@ test('late preference, archive cleanup, metadata cleanup and history faults roll
       const pending: boolean[] = [];
       const submit = createSubmission((value) => pending.push(value));
       const mutate = async () => { await (kind === 'preference' ? grocery.setPrimaryBrand(1, 2) : kind === 'archive' ? grocery.setProductArchived(2, true) : grocery.saveProduct(draft)); };
-      await assert.rejects(submit(mutate), /injected primary failure/, kind);
+      await assert.rejects(submit(mutate), storage(/injected primary failure/), kind);
       assert.equal(draft.savedPrice, '3.000');
       assert.deepEqual(pending, [true, false]);
       assert.deepEqual(await storedState(f.db), before, kind);
@@ -2292,7 +2299,7 @@ test('stale eligibility and real connection locks reject primary writes while ad
     const beforeLock = await storedState(f.db);
     await f.db.withExclusiveTransactionAsync(async (tx) => {
       await tx.runAsync('UPDATE brands SET name = name WHERE id = 1');
-      await assert.rejects(peer.setPrimaryBrand(1, 1), /locked|no transaction is active/);
+      await assert.rejects(peer.setPrimaryBrand(1, 1), storage(/locked/, storageBusy));
     });
     assert.deepEqual(await storedState(f.db), beforeLock);
     let release: (() => void) | undefined;
@@ -2309,7 +2316,7 @@ test('stale eligibility and real connection locks reject primary writes while ad
     await createSubmission()(() => grocery.setPrimaryBrand(1, 2));
     const committed = await storedState(f.db);
     const readFailure: Database = { ...f.db, async getFirstAsync() { throw new Error('injected primary read failure'); } };
-    await assert.rejects(createGrocery(readFailure, now).getSubcategoryDetails(1), /read failure/);
+    await assert.rejects(createGrocery(readFailure, now).getSubcategoryDetails(1), storage(/read failure/));
     assert.equal((await grocery.getSubcategoryDetails(1)).primaryBrandId, 2);
     assert.deepEqual(await storedState(f.db), committed);
     assert.equal((await grocery.getMonth('2026-09')).total, 4000);
@@ -2541,7 +2548,7 @@ test('Inflation reads one coherent real-connection history and current-label sna
     assert.deepEqual([next.name, next.brand, next.categoryId, next.category, next.subcategory, next.increase, next.referencePrice, next.percentIncrease, next.periodEndPrice, next.points[0].store], ['Current milk', 'Current brand', 2, 'Other', 'Yogurt', 1000, 2000, 50, 3000, 'Current store']);
     const committed = await storedState(f.db);
     await f.db.execAsync('ALTER TABLE price_history RENAME COLUMN price TO unavailable_price');
-    try { await assert.rejects(grocery.getInflation(null, '2026-10', '2026-10'), /no such column/); }
+    try { await assert.rejects(grocery.getInflation(null, '2026-10', '2026-10'), storage(/no such column/)); }
     finally { await f.db.execAsync('ALTER TABLE price_history RENAME COLUMN unavailable_price TO price'); }
     assert.deepEqual(await grocery.getInflation(null, '2026-10', '2026-10'), [next]);
     assert.deepEqual(await storedState(f.db), committed);
@@ -2649,10 +2656,33 @@ test('import rejects non-SQLite, damaged, foreign, unversioned and too-new files
       ['unversioned.db', 'This file is not a grocery backup.'],
       ['too-new.db', 'This backup comes from a newer version of the app. Update the app, then import it again.'],
     ]) {
-      await assert.rejects(importFile(f, path(name)), { message }, name);
+      await assert.rejects(importFile(f, path(name)), (error) => error instanceof BackupError && error.message === message, name);
       assert.deepEqual(await storedState(f.db), saved, name);
     }
     assert.deepEqual(await importFile(f, path('good.db')), { purchases: 2, products: 2 });
     assert.equal((await createGrocery(f.db, now).getMonth('2026-10')).total, 2500);
   } finally { f.cleanup(); rmSync(folder, { recursive: true }); }
+});
+test('SQLite errors reach screens as one plain sentence, while app messages and retries are unchanged', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await f.db.execAsync('CREATE TRIGGER null_brand AFTER INSERT ON stores BEGIN INSERT INTO brands(name, name_key) VALUES (NULL, NULL); END;');
+    await assert.rejects(grocery.saveStore({ name: 'Corner shop' }), storage(/NOT NULL constraint failed/, 'The grocery data on this phone could not be read or saved.'));
+    assert.equal((await f.db.getAllAsync('SELECT * FROM stores')).length, 0);
+    await f.db.execAsync('DROP TRIGGER null_brand');
+    assert.equal(await grocery.saveStore({ name: 'Corner shop' }), 1);
+    await assert.rejects(grocery.saveStore({ name: 'Corner shop' }), { message: 'That store already exists. Select the saved record.' });
+    await f.db.execAsync('ALTER TABLE purchases RENAME COLUMN month TO unavailable_month');
+    try { await assert.rejects(grocery.getMonth('2026-10'), storage(/no such column/, 'The grocery data on this phone could not be read or saved.')); }
+    finally { await f.db.execAsync('ALTER TABLE purchases RENAME COLUMN unavailable_month TO month'); }
+    const writer = new DatabaseSync(f.path);
+    try {
+      writer.exec('BEGIN IMMEDIATE');
+      await assert.rejects(grocery.saveBrand({ name: 'Mazoon' }), storage(/database is locked/, 'The grocery data is busy with another change. Wait a moment.'));
+    } finally { writer.exec('ROLLBACK'); writer.close(); }
+    assert.equal(await grocery.saveBrand({ name: 'Mazoon' }), 1);
+    await assert.rejects(initializeDatabase(f.db, [...migrations, 'INVALID SQL;']), storage(/syntax error/, 'The grocery data on this phone could not be read or saved.'));
+    assert.equal((await createGrocery(f.db, now).getMonth('2026-10')).total, 0);
+  } finally { f.cleanup(); }
 });

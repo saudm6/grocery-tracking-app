@@ -134,6 +134,35 @@ function id(value: number): number {
   return value;
 }
 
+export const storageBusy = 'The grocery data is busy with another change. Wait a moment.';
+export const storageFailed = 'The grocery data on this phone could not be read or saved.';
+// Screens show error messages as written, so SQLite and native errors become a plain sentence here. The original stays as `cause`.
+export function storageError(error: unknown): Error {
+  return Object.assign(new Error(/locked|busy/i.test(String(error)) ? storageBusy : storageFailed), { cause: error });
+}
+async function attempt<T>(work: () => Promise<T>): Promise<T> {
+  try { return await work(); } catch (error) { throw storageError(error); }
+}
+function guardExecutor(executor: Executor): Executor {
+  return {
+    execAsync: (sql) => attempt(() => executor.execAsync(sql)),
+    runAsync: (sql, ...params) => attempt(() => executor.runAsync(sql, ...params)),
+    getFirstAsync: <T>(sql: string, ...params: SQLiteBindValue[]) => attempt(() => executor.getFirstAsync<T>(sql, ...params)),
+    getAllAsync: <T>(sql: string, ...params: SQLiteBindValue[]) => attempt(() => executor.getAllAsync<T>(sql, ...params)),
+  };
+}
+function guard(db: Database): Database {
+  return {
+    ...guardExecutor(db),
+    async withExclusiveTransactionAsync(work) {
+      // An error from `work` is already plain and explains more than a ROLLBACK failure that may replace it, such as after a locked BEGIN IMMEDIATE.
+      const failures: unknown[] = [];
+      try {
+        await db.withExclusiveTransactionAsync(async (tx) => { try { await work(guardExecutor(tx)); } catch (error) { failures.push(error); throw error; } });
+      } catch (error) { throw failures.length ? failures[0] : storageError(error); }
+    },
+  };
+}
 async function exclusive(db: Database, work: (tx: Executor) => Promise<void>) {
   await db.withExclusiveTransactionAsync(async (tx) => {
     // Expo begins on a fresh connection; restart the untouched transaction to enable its foreign keys.
@@ -143,7 +172,8 @@ async function exclusive(db: Database, work: (tx: Executor) => Promise<void>) {
     await work(tx);
   });
 }
-export async function initializeDatabase(db: Database, versions: readonly string[] = migrations) {
+export async function initializeDatabase(database: Database, versions: readonly string[] = migrations) {
+  const db = guard(database);
   await db.execAsync('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
   await exclusive(db, async (tx) => {
     const current = (await tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version'))?.user_version ?? 0;
@@ -310,7 +340,8 @@ function rankSpending<T extends { id: number; name: string; total: bigint }>(gro
   return [...groups.values()].map(({ total, ...group }) => ({ ...group, total: Number(total) }))
     .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name) || a.id - b.id);
 }
-export function createGrocery(db: Database, clock: () => Date = () => new Date()) {
+export function createGrocery(database: Database, clock: () => Date = () => new Date()) {
+  const db = guard(database);
   const saveReference = async (table: ReferenceTable, input: ReferenceChange): Promise<number> => {
     let savedId = 0;
     await exclusive(db, async (tx) => { savedId = await writeReference(tx, table, input); });

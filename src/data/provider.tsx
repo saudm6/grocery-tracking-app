@@ -2,7 +2,7 @@ import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 import { createContext, use, useEffect, useState, type PropsWithChildren } from 'react';
 import { ActivityIndicator, ScrollView, Text } from 'react-native';
 import { Action, ErrorMessage } from '../components/form';
-import { createGrocery, initializeDatabase, type Grocery } from './grocery';
+import { createGrocery, initializeDatabase, storageError, type Grocery } from './grocery';
 
 type Ready = { status: 'ready'; grocery: Grocery; database: SQLiteDatabase };
 const Context = createContext<Ready | null>(null);
@@ -13,13 +13,13 @@ export function GroceryProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     let active = true;
     const opening = (async () => {
-      const connection = await openDatabaseAsync('grocery.db', { useNewConnection: true });
+      const connection = await openDatabaseAsync('grocery.db', { useNewConnection: true }).catch((error: unknown) => { throw storageError(error); });
       try {
         await initializeDatabase(connection);
         if (active) setStartup({ status: 'ready', grocery: createGrocery(connection), database: connection });
         return connection;
       } catch (error) {
-        await connection.closeAsync();
+        await connection.closeAsync().catch(() => {});
         throw error;
       }
     })();

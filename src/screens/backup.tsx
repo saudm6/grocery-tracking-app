@@ -6,7 +6,7 @@ import { backupDatabaseAsync, openDatabaseAsync, type SQLiteDatabase } from 'exp
 import { useRef, useState } from 'react';
 import { Alert, ScrollView, Text } from 'react-native';
 import { Action, ErrorMessage } from '../components/form';
-import { backupFileName, checkBackup, importBackup, type BackupSummary } from '../data/backup';
+import { BackupError, backupFileName, checkBackup, importBackup, type BackupSummary } from '../data/backup';
 import { localDate } from '../data/grocery';
 import { useDatabase } from '../data/provider';
 
@@ -27,13 +27,14 @@ export default function BackupPage() {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const running = useRef(false);
-  const run = async (step: Step, work: () => Promise<void>, explain: (message: string) => string) => {
+  const run = async (step: Step, work: () => Promise<void>, fallback: string) => {
     if (running.current) return;
     running.current = true;
     setBusy(step); setError(''); setNotice('');
     try { await work(); } catch (failure) {
       if (step !== 'export') { discard(); setPicked(null); }
-      setError(explain(failure instanceof Error ? failure.message : 'Unknown error.'));
+      // Only backup.ts messages are shown as written. Picker, file and SQLite messages are replaced by the step's plain sentence.
+      setError(`${failure instanceof BackupError ? failure.message : fallback} ${step === 'export' ? 'Your data is unchanged.' : 'Your current data was kept.'}`);
     } finally { running.current = false; setBusy(null); }
   };
   const exportBackup = () => run('export', async () => {
@@ -41,7 +42,7 @@ export default function BackupPage() {
     file.write(await database.serializeAsync());
     await shareAsync(file.uri, { mimeType: 'application/vnd.sqlite3', UTI: 'public.database', dialogTitle: 'Save grocery backup' });
     setNotice(`Backup file ${file.name} is ready. Check that it was saved where you sent it.`);
-  }, (message) => `Could not export a backup. ${message} Your data is unchanged.`);
+  }, 'Could not export a backup.');
   const chooseBackup = () => run('check', async () => {
     const result = await getDocumentAsync({ copyToCacheDirectory: true });
     if (result.canceled) return;
@@ -49,14 +50,14 @@ export default function BackupPage() {
     staging().create({ intermediates: true });
     await new File(result.assets[0].uri).move(new File(staging(), 'backup.db'));
     setPicked({ name: result.assets[0].name, summary: await withPicked((backup) => checkBackup(backup)) });
-  }, (message) => `${message} Your current data was kept.`);
+  }, 'Could not read the chosen file.');
   const replaceData = () => run('import', async () => {
     const summary = await withPicked((backup) => importBackup(backup, () => backupDatabaseAsync({ sourceDatabase: backup, destDatabase: database })));
     discard();
     setPicked(null);
     router.dismissTo('/');
     Alert.alert('Backup imported', `Your groceries now show the backup: ${summarize(summary)}.`);
-  }, (message) => `${message} Your current data was kept.`);
+  }, 'Could not import this backup.');
   return <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 20, gap: 16, paddingBottom: 40 }}>
     <Text>A backup is one file with all your groceries: purchases, products, codes, saved prices, price history, brands, categories, subcategories and stores.</Text>
     {notice ? <Text selectable accessibilityLiveRegion="polite">{notice}</Text> : null}
