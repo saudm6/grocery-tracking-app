@@ -1,5 +1,7 @@
 # First-version implementation backlog
 
+> **2026-10-12:** This is the original issue breakdown. #1–#5 and #9–#16 are merged. The remaining work (#6, #7 and #8 merged into one step where unknown codes open Add product, backup, #17, and #18) follows [Status and remaining plan](STATUS.md). Its "actual phone hardware" requirements are replaced by Android-emulator checks plus two iPhone checklists.
+
 The [app design](superpowers/specs/2026-10-09-grocery-tracker-design.md) defines the behavior. Each linked GitHub issue has its own acceptance criteria and verification. Start with #1's manual offline purchase; implement each later slice once its prerequisites are complete. Shared price/history, identity, and database rules are established before multiple screens depend on them.
 
 | Issue | Complete user-facing slice | Blocked by |
