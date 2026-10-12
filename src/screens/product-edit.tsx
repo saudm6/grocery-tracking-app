@@ -4,7 +4,7 @@ import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text } from 'react
 import { Action, ErrorMessage, Field } from '../components/form';
 import { GroupingField } from '../components/grouping-field';
 import { ReferenceField } from '../components/reference-field';
-import type { CodeFormat } from '../data/code';
+import { handedOffCode, type CodeFormat, type CodeInput } from '../data/code';
 import { formatOMR, parseOMR, type Grouping, type ProductDetails, type ProductSummary, type Reference, type References } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 import { createSubmission } from '../data/submission';
@@ -14,16 +14,18 @@ const formats: { value: CodeFormat | 'none'; label: string }[] = [
   { value: 'ean8', label: 'EAN-8 (8 digits)' }, { value: 'ean13', label: 'EAN-13 (13 digits)' }, { value: 'qr', label: 'QR (exact text)' },
 ];
 
-function ProductEditor({ product, references, readError, refresh, month }: { product: ProductDetails | null; references: References; readError: string; refresh: () => void; month?: string }) {
+function ProductEditor({ product, references, readError, refresh, month, initialCode, fromPurchase }: {
+  product: ProductDetails | null; references: References; readError: string; refresh: () => void; month?: string; initialCode: CodeInput | null; fromPurchase: boolean;
+}) {
   const grocery = useGrocery();
   const [name, setName] = useState(product?.name ?? '');
   const [brand, setBrand] = useState<Reference>(product?.brandId ? { id: product.brandId } : { name: '' });
   const [grouping, setGrouping] = useState<Grouping>(product ? product.subcategoryId !== null ? { subcategory: { id: product.subcategoryId } } : { category: { id: product.categoryId! } } : { category: { name: '' } });
   const [price, setPrice] = useState(product?.savedPrice === null || !product ? '' : formatOMR(product.savedPrice));
   const [store, setStore] = useState<Reference>(product?.savedStoreId ? { id: product.savedStoreId } : { name: '' });
-  const [format, setFormat] = useState<CodeFormat | 'none'>('none');
+  const [format, setFormat] = useState<CodeFormat | 'none'>(initialCode?.format ?? 'none');
   const [choosingFormat, setChoosingFormat] = useState(false);
-  const [code, setCode] = useState('');
+  const [code, setCode] = useState(initialCode?.value ?? '');
   const [notInflation, setNotInflation] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -50,7 +52,8 @@ function ProductEditor({ product, references, readError, refresh, month }: { pro
         const productId = await grocery.saveProduct({ id: product?.id, name, brand: brand.id !== undefined || brand.name.trim() ? brand : null, grouping,
           savedPrice: price, savedStore: store.id !== undefined || store.name.trim() ? store : null,
           code: format === 'none' ? undefined : { format, value: code }, notInflation: canExclude && notInflation });
-        router.dismissTo({ pathname: '/product/[id]', params: { id: productId, ...(month === undefined ? {} : { month }) } });
+        const monthParam = month === undefined ? {} : { month };
+        router.dismissTo(fromPurchase ? { pathname: '/purchase', params: { productId, ...monthParam } } : { pathname: '/product/[id]', params: { id: productId, ...monthParam } });
         return productId;
       });
     } catch (failure) {
@@ -88,8 +91,9 @@ function ProductEditor({ product, references, readError, refresh, month }: { pro
 }
 
 export default function ProductEdit() {
-  const params = useLocalSearchParams<{ id?: string; month?: string }>();
+  const params = useLocalSearchParams<{ id?: string; month?: string; codeHandoff?: string; from?: string }>();
   const productId = params.id === undefined ? undefined : Number(params.id);
+  const [initialCode] = useState(() => handedOffCode(params.codeHandoff));
   const grocery = useGrocery();
   const [loaded, setLoaded] = useState<{ references: References; product: ProductDetails | null } | null>(null);
   const [readError, setReadError] = useState('');
@@ -105,7 +109,7 @@ export default function ProductEdit() {
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={process.env.EXPO_OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={88}>
     <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, gap: 16, paddingBottom: 40 }}>
       {readError ? <><ErrorMessage message={readError} /><Action label="Retry product choices" onPress={refresh} /></> : loaded === null ? <ActivityIndicator accessibilityLabel="Loading product choices" /> : null}
-      {loaded ? <ProductEditor key={productId ?? 'new'} product={loaded.product} references={loaded.references} readError={readError} refresh={refresh} month={params.month} /> : null}
+      {loaded ? <ProductEditor key={productId ?? 'new'} product={loaded.product} references={loaded.references} readError={readError} refresh={refresh} month={params.month} initialCode={initialCode} fromPurchase={params.from === 'purchase'} /> : null}
     </ScrollView>
   </KeyboardAvoidingView>;
 }

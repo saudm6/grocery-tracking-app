@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import type { SQLiteBindValue } from 'expo-sqlite';
-import { cameraCode, normalizeCode, type CodeInput } from './code';
+import { cameraCode, handedOffCode, handOffCode, normalizeCode, type CodeInput } from './code';
 import { createGrocery, formatOMR, initializeDatabase, lineTotal, parseOMR, parseQuantity, referenceNameKey, validateDate, validateMonth, type Database, type Executor, type Grouping, type ProductInput, type PurchaseCorrection, type PurchaseInput } from './grocery';
 import { migrations } from './schema';
 import { createSubmission } from './submission';
@@ -1241,6 +1241,26 @@ test('camera and typed lookup retain exact canonical owners without writes, incl
       assert.deepEqual(await reopened.db.getFirstAsync('SELECT saved_price, saved_store_id FROM products WHERE id = 1'), { saved_price: 2000, saved_store_id: 1 });
       assert.deepEqual(await reopened.db.getAllAsync('PRAGMA foreign_key_check'), []);
     } finally { reopened.close(); }
+  } finally { f.cleanup(); }
+});
+
+test('an unknown scanned QR reaches Add product exactly and its saved code finds the new product without spending', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    const text = 'grocery-lane: unknown QR #7 & 50% off? /path %41+🛒';
+    const scanned = cameraCode({ type: 'qr', data: 'display value', raw: text }, 'android');
+    assert.equal(await grocery.lookupCode(scanned), null);
+    const key = handOffCode(scanned);
+    assert.deepEqual(handedOffCode(key), { format: 'qr', value: 'grocery-lane: unknown QR #7 & 50% off? /path %41+🛒' });
+    assert.equal(handedOffCode(undefined), null);
+    const productId = await grocery.saveProduct(catalog({ name: 'Lane QR product', code: handedOffCode(key)! }));
+    assert.equal(productId, 1);
+    assert.deepEqual(await grocery.lookupCode(cameraCode({ type: 'qr', data: text }, 'ios')), { id: 1, name: 'Lane QR product', brand: null, archived: false });
+    assert.deepEqual(await f.db.getAllAsync('SELECT hex(original_code) AS original, scanner_format FROM product_codes'), [{ original: '67726F636572792D6C616E653A20756E6B6E6F776E205152202337202620353025206F66663F202F70617468202534312BF09F9B92', scanner_format: 'qr' }]);
+    assert.deepEqual(await f.db.getAllAsync('SELECT * FROM purchases'), []);
+    handOffCode({ format: 'ean13', value: '0036000291452' });
+    assert.equal(handedOffCode(key), null);
   } finally { f.cleanup(); }
 });
 

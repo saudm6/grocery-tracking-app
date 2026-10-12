@@ -12,7 +12,7 @@ const formats: { value: CodeFormat; label: string }[] = [
   { value: 'upc_a', label: 'UPC-A (12 digits)' }, { value: 'upc_e', label: 'UPC-E (8 digits)' },
   { value: 'ean8', label: 'EAN-8 (8 digits)' }, { value: 'ean13', label: 'EAN-13 (13 digits)' }, { value: 'qr', label: 'QR (exact text)' },
 ];
-type Lookup = { status: 'idle' | 'loading' } | { status: 'ready'; product: ProductSummary | null } | { status: 'error'; message: string };
+type Lookup = { status: 'idle' | 'loading' } | { status: 'ready'; input: CodeInput; product: ProductSummary | null } | { status: 'error'; message: string };
 export type ProductChooserHandle = { cancelIdentification: () => void };
 
 function SavedProductChoice({ product, month, disabled, onChoose }: {
@@ -26,8 +26,8 @@ function SavedProductChoice({ product, month, disabled, onChoose }: {
   </ProductRow>;
 }
 
-export function ProductChooser({ month, subcategories, onChoose, disabled, visible = true, cameraEnabled = false, ref }: {
-  month: string; subcategories: SubcategoryRow[]; onChoose: (id: number) => void; disabled: boolean; visible?: boolean; cameraEnabled?: boolean; ref?: Ref<ProductChooserHandle>;
+export function ProductChooser({ month, subcategories, onChoose, onAddCode, disabled, visible = true, cameraEnabled = false, ref }: {
+  month: string; subcategories: SubcategoryRow[]; onChoose: (id: number) => void; onAddCode?: (input: CodeInput) => void; disabled: boolean; visible?: boolean; cameraEnabled?: boolean; ref?: Ref<ProductChooserHandle>;
 }) {
   const grocery = useGrocery();
   const [subcategoryId, setSubcategoryId] = useState<number | null>(null);
@@ -73,7 +73,7 @@ export function ProductChooser({ month, subcategories, onChoose, disabled, visib
     setLookup({ status: 'loading' });
     void grocery.lookupCode(input).then((product) => {
       if (lookupReadId.current !== request || !mounted.current || !latest.current.visible || AppState.currentState !== 'active') return;
-      setLookup({ status: 'ready', product });
+      setLookup({ status: 'ready', input, product });
       if (selectOwner && product && !product.archived && !latest.current.disabled) {
         lookupReadId.current++;
         latest.current.onChoose(product.id);
@@ -137,6 +137,9 @@ export function ProductChooser({ month, subcategories, onChoose, disabled, visib
     <Field label={format === 'qr' ? 'QR content (exact text)' : 'Product code (including check digit)'} value={code} onChangeText={(value) => { clearLookup(); setCode(value); }} editable={!disabled} autoCapitalize="none" autoCorrect={false} multiline={format === 'qr'} />
     {format === 'qr' ? <Text selectable>QR preview · {JSON.stringify(code)}</Text> : <Text>Enter all digits and choose their format. Eight-digit UPC-E and EAN-8 codes are different formats.</Text>}
     <Action label={lookup.status === 'loading' ? 'Looking up code…' : 'Look up typed code'} disabled={disabled || lookup.status === 'loading'} onPress={findCode} />
-    {lookup.status === 'error' ? <><ErrorMessage message={lookup.message} /><Action label="Retry code lookup" disabled={disabled} onPress={retryCode} /></> : lookup.status === 'ready' ? lookup.product ? <SavedProductChoice product={lookup.product} month={month} disabled={disabled} onChoose={chooseSaved} /> : <Text>No saved product owns this code. Your code is kept. Change it or choose another saved product. This lookup does not attach a code.</Text> : null}
+    {lookup.status === 'error' ? <><ErrorMessage message={lookup.message} /><Action label="Retry code lookup" disabled={disabled} onPress={retryCode} /></> : lookup.status === 'ready' ? lookup.product ? <SavedProductChoice product={lookup.product} month={month} disabled={disabled} onChoose={chooseSaved} /> : <>
+      <Text>No saved product owns this code. Your code is kept. Change it or choose another saved product. This lookup does not attach a code.</Text>
+      {onAddCode ? <Action label="Add as new product" disabled={disabled} onPress={() => onAddCode(lookup.input)} /> : null}
+    </> : null}
   </View>;
 }
