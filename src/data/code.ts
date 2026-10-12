@@ -15,6 +15,17 @@ export function cameraCode(result: { type: string; data: string; raw?: string },
   return { format, value };
 }
 
+// Expo Router URL-decodes params a second time, so exact QR text moves between screens in memory.
+let handoff: { key: string; input: CodeInput } | null = null;
+let handoffs = 0;
+export function handOffCode(input: CodeInput): string {
+  handoff = { key: String(++handoffs), input };
+  return handoff.key;
+}
+export function handedOffCode(key: unknown): CodeInput | null {
+  return handoff !== null && handoff.key === key ? handoff.input : null;
+}
+
 export function normalizeCode(input: CodeInput): NormalizedCode {
   if (typeof input?.value !== 'string') throw new Error('Enter a code and choose its format.');
   const { format, value } = input;

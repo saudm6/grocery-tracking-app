@@ -1,10 +1,11 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text } from 'react-native';
+import { CodeScanner } from '../components/code-scanner';
 import { Action, ErrorMessage, Field } from '../components/form';
 import { GroupingField } from '../components/grouping-field';
 import { ReferenceField } from '../components/reference-field';
-import type { CodeFormat } from '../data/code';
+import { handedOffCode, type CodeFormat, type CodeInput } from '../data/code';
 import { formatOMR, parseOMR, type Grouping, type ProductDetails, type ProductSummary, type Reference, type References } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 import { createSubmission } from '../data/submission';
@@ -14,16 +15,18 @@ const formats: { value: CodeFormat | 'none'; label: string }[] = [
   { value: 'ean8', label: 'EAN-8 (8 digits)' }, { value: 'ean13', label: 'EAN-13 (13 digits)' }, { value: 'qr', label: 'QR (exact text)' },
 ];
 
-function ProductEditor({ product, references, readError, refresh, month }: { product: ProductDetails | null; references: References; readError: string; refresh: () => void; month?: string }) {
+function ProductEditor({ product, references, readError, refresh, month, initialCode, fromPurchase }: {
+  product: ProductDetails | null; references: References; readError: string; refresh: () => void; month?: string; initialCode: CodeInput | null; fromPurchase: boolean;
+}) {
   const grocery = useGrocery();
   const [name, setName] = useState(product?.name ?? '');
   const [brand, setBrand] = useState<Reference>(product?.brandId ? { id: product.brandId } : { name: '' });
   const [grouping, setGrouping] = useState<Grouping>(product ? product.subcategoryId !== null ? { subcategory: { id: product.subcategoryId } } : { category: { id: product.categoryId! } } : { category: { name: '' } });
   const [price, setPrice] = useState(product?.savedPrice === null || !product ? '' : formatOMR(product.savedPrice));
   const [store, setStore] = useState<Reference>(product?.savedStoreId ? { id: product.savedStoreId } : { name: '' });
-  const [format, setFormat] = useState<CodeFormat | 'none'>('none');
+  const [format, setFormat] = useState<CodeFormat | 'none'>(initialCode?.format ?? 'none');
   const [choosingFormat, setChoosingFormat] = useState(false);
-  const [code, setCode] = useState('');
+  const [code, setCode] = useState(initialCode?.value ?? '');
   const [notInflation, setNotInflation] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -33,13 +36,15 @@ function ProductEditor({ product, references, readError, refresh, month }: { pro
   useFocusEffect(useCallback(() => () => { ownerReadId.current++; }, []));
   const submit = useRef(createSubmission(setSaving)).current;
   const clearOwner = () => { ownerReadId.current++; setOwner(null); setOwnerError(''); };
-  const checkOwner = () => {
+  const current: CodeInput | null = format === 'none' ? null : { format, value: code };
+  const checkOwner = (input: CodeInput | null) => {
     const request = ++ownerReadId.current;
-    if (format === 'none') return;
-    void grocery.lookupCode({ format, value: code }).then((found) => {
+    if (input === null) return;
+    void grocery.lookupCode(input).then((found) => {
       if (ownerReadId.current === request) { setOwner(found && found.id !== product?.id ? found : null); setOwnerError(''); }
     }).catch(() => { if (ownerReadId.current === request) setOwnerError('Could not look up this code. Check the format and value, or retry.'); });
   };
+  const scanned = (input: CodeInput) => { clearOwner(); setFormat(input.format); setCode(input.value); setChoosingFormat(false); checkOwner(input); };
   let canExclude = false;
   try { canExclude = !!product?.canExcludeSavedPrice && !!price.trim() && parseOMR(price) !== product.savedPrice; } catch {}
   const save = async () => {
@@ -49,14 +54,15 @@ function ProductEditor({ product, references, readError, refresh, month }: { pro
         clearOwner();
         const productId = await grocery.saveProduct({ id: product?.id, name, brand: brand.id !== undefined || brand.name.trim() ? brand : null, grouping,
           savedPrice: price, savedStore: store.id !== undefined || store.name.trim() ? store : null,
-          code: format === 'none' ? undefined : { format, value: code }, notInflation: canExclude && notInflation });
-        router.dismissTo({ pathname: '/product/[id]', params: { id: productId, ...(month === undefined ? {} : { month }) } });
+          code: current ?? undefined, notInflation: canExclude && notInflation });
+        const monthParam = month === undefined ? {} : { month };
+        router.dismissTo(fromPurchase ? { pathname: '/purchase', params: { productId, ...monthParam } } : { pathname: '/product/[id]', params: { id: productId, ...monthParam } });
         return productId;
       });
     } catch (failure) {
       setError(`${failure instanceof Error ? failure.message : 'Could not save the product.'} Your entries are kept. Correct them or retry.`);
       refresh();
-      checkOwner();
+      checkOwner(current);
     }
   };
   const editing = !saving && !product?.archived;
@@ -74,6 +80,7 @@ function ProductEditor({ product, references, readError, refresh, month }: { pro
     <Action label="Use no saved store" disabled={!editing} onPress={() => setStore({ name: '' })} />
     {canExclude ? <><Text>This changed price has an earlier observation. Choose its inflation status before saving.</Text><Action label={notInflation ? 'Not inflation selected · switch to Included' : 'Included in inflation · mark Not inflation'} disabled={!editing} onPress={() => setNotInflation((excluded) => !excluded)} /></> : null}
     <Text>{product?.codes.length ? `${product.codes.length} existing ${product.codes.length === 1 ? 'code remains' : 'codes remain'} on this product. You can add another.` : 'A product code is optional.'}</Text>
+    <CodeScanner label="Scan code" onCapture={scanned} disabled={!editing} />
     <Action label={`Code format · ${formats.find((choice) => choice.value === format)!.label} · Change`} disabled={!editing} onPress={() => setChoosingFormat((open) => !open)} />
     {choosingFormat ? formats.map((choice) => <Action key={choice.value} label={`Use ${choice.label}`} disabled={!editing} onPress={() => { clearOwner(); setFormat(choice.value); setChoosingFormat(false); }} />) : null}
     {format !== 'none' ? <>
@@ -81,15 +88,16 @@ function ProductEditor({ product, references, readError, refresh, month }: { pro
       {format === 'qr' ? <Text selectable>QR preview · {JSON.stringify(code)}</Text> : <Text>Enter all digits without spaces or separators. UPC-E needs its full 8 digits.</Text>}
     </> : null}
     {owner ? <><Text>This code identifies {owner.name}{owner.archived ? ' · Archived. Reactivate its existing identity from details.' : '.'}</Text><Action label={`Open code owner ${owner.name}`} onPress={() => router.push({ pathname: '/product/[id]', params: { id: owner.id, ...(month === undefined ? {} : { month }) } })} /></> : null}
-    {ownerError ? <><ErrorMessage message={ownerError} /><Action label="Retry code owner lookup" onPress={checkOwner} /></> : null}
+    {ownerError ? <><ErrorMessage message={ownerError} /><Action label="Retry code owner lookup" onPress={() => checkOwner(current)} /></> : null}
     {error ? <ErrorMessage message={error} /> : null}
     <Action label={saving ? 'Saving product…' : 'Save product'} disabled={!editing || !!readError} onPress={() => { void save(); }} />
   </>;
 }
 
 export default function ProductEdit() {
-  const params = useLocalSearchParams<{ id?: string; month?: string }>();
+  const params = useLocalSearchParams<{ id?: string; month?: string; codeHandoff?: string; from?: string }>();
   const productId = params.id === undefined ? undefined : Number(params.id);
+  const [initialCode] = useState(() => handedOffCode(params.codeHandoff));
   const grocery = useGrocery();
   const [loaded, setLoaded] = useState<{ references: References; product: ProductDetails | null } | null>(null);
   const [readError, setReadError] = useState('');
@@ -105,7 +113,7 @@ export default function ProductEdit() {
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={process.env.EXPO_OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={88}>
     <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, gap: 16, paddingBottom: 40 }}>
       {readError ? <><ErrorMessage message={readError} /><Action label="Retry product choices" onPress={refresh} /></> : loaded === null ? <ActivityIndicator accessibilityLabel="Loading product choices" /> : null}
-      {loaded ? <ProductEditor key={productId ?? 'new'} product={loaded.product} references={loaded.references} readError={readError} refresh={refresh} month={params.month} /> : null}
+      {loaded ? <ProductEditor key={productId ?? 'new'} product={loaded.product} references={loaded.references} readError={readError} refresh={refresh} month={params.month} initialCode={initialCode} fromPurchase={params.from === 'purchase'} /> : null}
     </ScrollView>
   </KeyboardAvoidingView>;
 }
