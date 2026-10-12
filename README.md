@@ -8,10 +8,10 @@ The SQLite file `grocery.db` stays on the device. Prices use integer baisa and d
 
 Run `npm run typecheck`, `npm run lint`, `npm test`, and `npm run bundle` before opening a PR. Tests run the production grocery boundary against real Node SQLite, including exclusive connection foreign keys, failed-save rollback, repeated submission, migration recovery, and reopening persistence. Native bundles verify SDK wiring. Device tests are still required to confirm actual offline restart and screen-reader behavior.
 
-Home analytics, Inflation reports, catalog management, codes, and scanning follow in later issues. Their tabs currently explain that status.
+Home analytics, the Inflation tab, the catalog (products, brands, categories, subcategories, stores, typed codes), purchase corrections, and price history are implemented. Camera scanning, adding products from unknown codes, backup/export, and final polish are in progress. See [Status and remaining plan](docs/STATUS.md).
 
 Uninstalling the app or losing the device can lose local records. This version has no backup or cloud synchronization.
 
 First-version design: [Grocery tracker app design](docs/superpowers/specs/2026-10-09-grocery-tracker-design.md).
 
-Implementation plan: [First-version backlog](docs/implementation-backlog.md).
+Current status and remaining work: [Status and remaining plan](docs/STATUS.md). Original issue breakdown: [First-version backlog](docs/implementation-backlog.md).
