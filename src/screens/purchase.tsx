@@ -5,6 +5,7 @@ import { Action, ErrorMessage, Field } from '../components/form';
 import { GroupingField } from '../components/grouping-field';
 import { ProductChooser, type ProductChooserHandle } from '../components/product-chooser';
 import { ReferenceField } from '../components/reference-field';
+import { handOffCode, type CodeInput } from '../data/code';
 import { formatOMR, lineTotal, localDate, parseOMR, parseQuantity, validateMonth, type Grouping, type ProductDetails, type Reference, type References } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 import { createSubmission } from '../data/submission';
@@ -64,10 +65,20 @@ export default function Purchase() {
     if (key === 'name') identifier.current?.cancelIdentification();
     setDraft((previous) => ({ ...previous, [key]: value }));
   };
-  const chooseProduct = (id: number) => {
+  const chooseProduct = useCallback((id: number) => {
     if (id !== selectedId) { readId.current++; setNotInflation(false); setSelection({ kind: 'known', id, details: null }); }
     setChoosingProduct(false);
-  };
+  }, [selectedId]);
+  // Saving Add product from this purchase returns here with the new productId param.
+  const routeProduct = routeError ? null : routeProductId;
+  const appliedRouteProduct = useRef(routeProduct);
+  useFocusEffect(useCallback(() => {
+    if (routeProduct === null || routeProduct === appliedRouteProduct.current) return;
+    appliedRouteProduct.current = routeProduct;
+    identifier.current?.cancelIdentification();
+    chooseProduct(routeProduct);
+  }, [routeProduct, chooseProduct]));
+  const addProduct = (input: CodeInput) => router.push({ pathname: '/product-edit', params: { codeHandoff: handOffCode(input), month: draft.month, from: 'purchase' } });
   const chooseNew = () => { identifier.current?.cancelIdentification(); readId.current++; initializedProduct.current = null; setNotInflation(false); setSelection({ kind: 'new' }); setChoosingProduct(false); };
   let preview = '';
   try { preview = `${formatOMR(lineTotal(parseQuantity(draft.quantity), parseOMR(draft.price)))} OMR`; } catch {}
@@ -93,7 +104,7 @@ export default function Purchase() {
       {routeError ? <ErrorMessage message={`${routeError} Return and open a purchase from a valid month or product.`} /> : null}
       <Field label="Purchase month (YYYY-MM)" value={draft.month} editable={false} />
       <Action label={choosingProduct ? 'Close saved product choices' : selectedId === null ? 'Choose a saved product' : 'Change selected product'} disabled={saving || !!routeError} onPress={() => setChoosingProduct((open) => !open)} />
-      <ProductChooser ref={identifier} month={draft.month} subcategories={references?.subcategories ?? []} onChoose={chooseProduct} disabled={saving || !!routeError} visible={choosingProduct} cameraEnabled />
+      <ProductChooser ref={identifier} month={draft.month} subcategories={references?.subcategories ?? []} onChoose={chooseProduct} onAddCode={addProduct} disabled={saving || !!routeError} visible={choosingProduct} cameraEnabled />
       {choosingProduct ? <Text>If there is no saved match, enter a new product in this form. Close these choices to return to your entries.</Text> : null}
       {selectedId === null ? <>
         <Field label="Product name" value={draft.name} onChangeText={set('name')} editable={editing} autoFocus />
