@@ -26,7 +26,7 @@ export default function Spending() {
     catch (error) { setMonthError(error instanceof Error ? error.message : 'Choose a valid month.'); }
   };
   return <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, gap: 16 }}>
-    <Tabs.Screen options={{ headerRight: () => <Pressable accessibilityRole="button" accessibilityLabel="Add purchase" onPress={() => pushScreen({ pathname: '/purchase', params: { month } })} style={{ padding: 14, minHeight: 48 }}><Text style={{ color: '#21643c', fontSize: 18 }}>Add</Text></Pressable> }} />
+    <Tabs.Screen options={{ headerRight: () => <Pressable accessibilityRole="button" accessibilityLabel="Add purchase" onPress={() => pushScreen({ pathname: '/purchase', params: { month } })} style={{ paddingHorizontal: 14, minHeight: 48, justifyContent: 'center' }}><Text style={{ color: '#21643c', fontSize: 18 }}>Add</Text></Pressable> }} />
     <Field label="Year and month (YYYY-MM)" value={draftMonth} onChangeText={setDraftMonth} autoCapitalize="none" autoCorrect={false} returnKeyType="done" onSubmitEditing={chooseMonth} />
     <Action label="Show month" onPress={chooseMonth} />
     {monthError ? <ErrorMessage message={monthError} /> : null}
