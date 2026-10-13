@@ -1,7 +1,7 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text } from 'react-native';
-import { Action, ErrorMessage, Field } from '../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../components/form';
 import { GroupingField } from '../components/grouping-field';
 import { ProductChooser } from '../components/product-chooser';
 import { PriceObservationCard } from '../components/price-observation-card';
@@ -124,7 +124,7 @@ function PurchaseEditor({ purchase, references, readReady, refresh, onCommitted 
       {productRead === 'loading' ? <ActivityIndicator accessibilityLabel="Loading replacement product" /> : null}
       {productError ? <><ErrorMessage message={productError} /><Action label="Retry replacement product" disabled={saving} onPress={refreshProduct} /></> : null}
       {product?.archived ? <ErrorMessage message="This replacement is archived. Reactivate its existing identity from details before saving. Your paid entries are kept." /> : null}
-      {product ? <Action label={product.archived ? 'Open archived replacement product' : 'Open replacement product details'} disabled={saving || confirmingDelete} onPress={() => router.push({ pathname: '/product/[id]', params: { id: product.id, month: draft.month } })} /> : null}
+      {product ? <Action label={product.archived ? 'Open archived replacement product' : 'Open replacement product details'} disabled={saving || confirmingDelete} onPress={() => pushScreen({ pathname: '/product/[id]', params: { id: product.id, month: draft.month } })} /> : null}
       <Action label="Keep original recorded product and grouping" disabled={saving || confirmingDelete} onPress={keepRecorded} />
     </>}
     <Text>Grouping here corrects this purchase only. Other purchases and the product&apos;s current grouping are kept.</Text>

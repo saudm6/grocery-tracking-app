@@ -1,7 +1,7 @@
-import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, Text, View } from 'react-native';
-import { Action, ErrorMessage } from '../components/form';
+import { Action, ErrorMessage, pushScreen } from '../components/form';
 import { PurchaseCard } from '../components/purchase-card';
 import { PriceObservationCard } from '../components/price-observation-card';
 import { formatOMR, type PriceObservation, type ProductDetails, type PurchaseRow } from '../data/grocery';
@@ -69,14 +69,14 @@ export default function Product() {
       <Text selectable accessibilityRole="header" style={{ fontSize: 24 }}>{product.name}{product.archived ? ' · Archived' : ''}</Text>
       <Text selectable>Brand · {product.brand ?? 'No brand'}</Text>
       <Text selectable>Category · {product.category}{product.subcategory ? ` / ${product.subcategory}` : ''}</Text>
-      {product.subcategoryId !== null ? <Action label={`Open subcategory ${product.category} / ${product.subcategory}`} disabled={!!error} onPress={() => router.push({ pathname: '/subcategory/[id]', params: { id: product.subcategoryId! } })} /> : null}
+      {product.subcategoryId !== null ? <Action label={`Open subcategory ${product.category} / ${product.subcategory}`} disabled={!!error} onPress={() => pushScreen({ pathname: '/subcategory/[id]', params: { id: product.subcategoryId! } })} /> : null}
       <Text selectable>Saved price · {product.savedPrice === null ? 'Not set' : `${formatOMR(product.savedPrice)} OMR`}</Text>
       <Text selectable>Saved store · {product.savedStore ?? 'Not set'}</Text>
       <Text selectable>Price first set · {product.priceFirstSet ? new Date(product.priceFirstSet).toLocaleString() : 'Not set'}</Text>
       <Text selectable>Last saved price changed · {product.lastSavedPriceChanged ? new Date(product.lastSavedPriceChanged).toLocaleString() : 'Not set'}</Text>
       {product.archived ? <Text>Reactivate this product to edit it or record a new purchase. Its codes and history remain owned by this product.</Text> : <>
-        <Action label="Record purchase" disabled={disabled} onPress={() => router.push({ pathname: '/purchase', params: { productId: product.id, ...(params.month === undefined ? {} : { month: params.month }) } })} />
-        <Action label="Edit product" disabled={disabled} onPress={() => router.push({ pathname: '/product-edit', params: { id: product.id, ...(params.month === undefined ? {} : { month: params.month }) } })} />
+        <Action label="Record purchase" disabled={disabled} onPress={() => pushScreen({ pathname: '/purchase', params: { productId: product.id, ...(params.month === undefined ? {} : { month: params.month }) } })} />
+        <Action label="Edit product" disabled={disabled} onPress={() => pushScreen({ pathname: '/product-edit', params: { id: product.id, ...(params.month === undefined ? {} : { month: params.month }) } })} />
       </>}
       <ArchiveAction key={`${product.id}:${product.archived}`} product={product} disabled={disabled} onCommitted={(archived) => { setLoaded((current) => current ? { ...current, product: { ...current.product, archived } } : null); setNotice(archived ? 'Product archived. Spending, codes, and history are kept.' : 'Product reactivated with its original identity.'); refresh(); }} />
       <Text accessibilityRole="header" style={{ fontSize: 22 }}>Product codes</Text>

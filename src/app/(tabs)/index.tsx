@@ -1,7 +1,7 @@
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, ScrollView, Text } from 'react-native';
-import { Action, ErrorMessage, Field } from '../../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../../components/form';
 import { formatOMR, localDate, validateMonth, type HomeAnalytics } from '../../data/grocery';
 import { useGrocery } from '../../data/provider';
 
@@ -28,7 +28,7 @@ export default function Home() {
     <Field label="Year and month (YYYY-MM)" value={draftMonth} onChangeText={setDraftMonth} autoCapitalize="none" autoCorrect={false} returnKeyType="done" onSubmitEditing={chooseMonth} />
     <Action label="Show month" onPress={chooseMonth} />
     {monthError ? <ErrorMessage message={monthError} /> : null}
-    <Action label="Open Total Spending" onPress={() => router.push('/spending')} />
+    <Action label="Open Total Spending" onPress={() => pushScreen('/spending')} />
     {read.status === 'loading' ? <ActivityIndicator accessibilityLabel="Loading monthly analytics" /> : read.status === 'error' ? <>
       <ErrorMessage message={read.message} />
       <Text>Your month selection is kept. Retry to read the saved purchases.</Text>

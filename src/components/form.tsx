@@ -1,4 +1,5 @@
 import { Button, Host } from '@expo/ui';
+import { router, type Href } from 'expo-router';
 import { Text, TextInput, View, type TextInputProps } from 'react-native';
 
 export function Field({ label, ...props }: TextInputProps & { label: string }) {
@@ -12,4 +13,12 @@ export function Action({ label, onPress, disabled = false }: { label: string; on
 }
 export function ErrorMessage({ message }: { message: string }) {
   return <Text selectable accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ color: '#a32020', fontSize: 16 }}>{message}</Text>;
+}
+// A double tap must not stack two copies of a screen, and the old screen still takes taps while the new one slides in.
+// Pass a function when building the route has a side effect, so an ignored tap does not run it.
+let lastPush = 0;
+export function pushScreen(href: Href | (() => Href)) {
+  if (Date.now() - lastPush < 1000) return;
+  lastPush = Date.now();
+  router.push(typeof href === 'function' ? href() : href);
 }

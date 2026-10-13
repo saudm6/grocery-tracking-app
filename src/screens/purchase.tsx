@@ -1,7 +1,7 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text } from 'react-native';
-import { Action, ErrorMessage, Field } from '../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../components/form';
 import { GroupingField } from '../components/grouping-field';
 import { ProductChooser, type ProductChooserHandle } from '../components/product-chooser';
 import { ReferenceField } from '../components/reference-field';
@@ -78,7 +78,7 @@ export default function Purchase() {
     identifier.current?.cancelIdentification();
     chooseProduct(routeProduct);
   }, [routeProduct, chooseProduct]));
-  const addProduct = (input: CodeInput) => router.push({ pathname: '/product-edit', params: { codeHandoff: handOffCode(input), month: draft.month, from: 'purchase' } });
+  const addProduct = (input: CodeInput) => pushScreen(() => ({ pathname: '/product-edit', params: { codeHandoff: handOffCode(input), month: draft.month, from: 'purchase' } }));
   const chooseNew = () => { identifier.current?.cancelIdentification(); readId.current++; initializedProduct.current = null; setNotInflation(false); setSelection({ kind: 'new' }); setChoosingProduct(false); };
   let preview = '';
   try { preview = `${formatOMR(lineTotal(parseQuantity(draft.quantity), parseOMR(draft.price)))} OMR`; } catch {}
@@ -117,7 +117,7 @@ export default function Purchase() {
           <Text selectable>Category · {product.category}{product.subcategory ? ` / ${product.subcategory}` : ''}</Text>
           <Text>New purchases use the current brand and grouping of this product. Earlier purchases keep their recorded identity.</Text>
           {product.archived ? <ErrorMessage message="This product is archived. Reactivate its original identity from details before saving. Your paid entries are kept." /> : null}
-          <Action label={product.archived ? 'Open archived product details' : 'Open selected product details'} disabled={saving} onPress={() => router.push({ pathname: '/product/[id]', params: { id: product.id, month: draft.month } })} />
+          <Action label={product.archived ? 'Open archived product details' : 'Open selected product details'} disabled={saving} onPress={() => pushScreen({ pathname: '/product/[id]', params: { id: product.id, month: draft.month } })} />
         </> : <ActivityIndicator accessibilityLabel="Loading selected product" />}
         <Action label="Enter a new product instead" disabled={saving || !!routeError || product === null} onPress={chooseNew} />
       </>}
