@@ -18,7 +18,8 @@ export function ErrorMessage({ message }: { message: string }) {
 // Pass a function when building the route has a side effect, so an ignored tap does not run it.
 let lastPush = 0;
 export function pushScreen(href: Href | (() => Href)) {
-  if (Date.now() - lastPush < 1000) return;
-  lastPush = Date.now();
+  const now = Date.now();
+  if (now >= lastPush && now - lastPush < 1000) return;
+  lastPush = now;
   router.push(typeof href === 'function' ? href() : href);
 }
