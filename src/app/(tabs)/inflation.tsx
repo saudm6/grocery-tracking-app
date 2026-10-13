@@ -42,6 +42,8 @@ export default function Inflation() {
       setChoosingCategory(false);
     } catch (error) { setFilterError(error instanceof Error ? error.message : 'Choose a valid month range.'); }
   };
+  // Every product has a category, so no categories means no prices are recorded yet.
+  const firstUse = categories.length === 0;
   const categoryLabel = (categoryId: number | null) => categoryId === null ? 'All categories' : categories.find((category) => category.id === categoryId)?.name ?? `Category ${categoryId}`;
   return <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, gap: 16, paddingBottom: 40 }}>
     <Text>Explore counted changes in recorded prices. Saved-price observations and explicitly applied receipts use their effective months. Spending and today’s saved defaults are separate.</Text>
@@ -58,6 +60,9 @@ export default function Inflation() {
     {read.status === 'loading' ? <ActivityIndicator accessibilityLabel="Loading recorded price changes" /> : read.status === 'error' ? <>
       <ErrorMessage message={read.message} />
       <Action label="Retry inflation report" onPress={() => { readId.current++; setRead({ status: 'loading' }); setSelection({ ...selection }); }} />
+    </> : firstUse ? <>
+      <Text>No prices recorded yet. Record purchases in Total Spending to track price changes.</Text>
+      <Action label="Open Total Spending" onPress={() => pushScreen('/spending')} />
     </> : <>
       <Text>Ranked by positive counted net increase. Included decreases offset increases. Categories reflect the product’s current grouping; archived products keep their history.</Text>
       {read.products.length === 0 ? <>

@@ -32,7 +32,7 @@ export default function Spending() {
     {monthError ? <ErrorMessage message={monthError} /> : null}
     {read.status === 'loading' ? <ActivityIndicator accessibilityLabel="Loading monthly purchases" /> : read.status === 'error' ? <><ErrorMessage message={read.message} /><Action label="Retry month" onPress={() => setSelection({ month })} /></> : <>
       <Text selectable accessibilityRole="header" style={{ fontSize: 24, fontVariant: ['tabular-nums'] }}>{month} total · {formatOMR(read.report.total)} OMR</Text>
-      {read.report.purchases.length === 0 ? <Text>No purchases in this month. Tap Add to record one.</Text> : read.report.purchases.map((purchase) => <PurchaseCard key={purchase.id} purchase={purchase} disabled={false} />)}
+      {read.report.purchases.length === 0 ? <Text>No purchases in {month} yet. Tap Add to record one.</Text> : read.report.purchases.map((purchase) => <PurchaseCard key={purchase.id} purchase={purchase} disabled={false} />)}
     </>}
   </ScrollView>;
 }
