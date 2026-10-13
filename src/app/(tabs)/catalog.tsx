@@ -11,5 +11,7 @@ export default function Catalog() {
     <Action label="Subcategories" onPress={() => router.push('/subcategories')} />
     <Action label="Stores" onPress={() => router.push('/stores')} />
     <Text>Catalog product saves do not record spending. You can also create products and categories while adding a purchase in Total Spending.</Text>
+    <Text>Backup exports all your grocery data to one file, or replaces it with a backup file.</Text>
+    <Action label="Backup" onPress={() => router.push('/backup')} />
   </ScrollView>;
 }

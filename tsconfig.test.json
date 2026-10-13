@@ -10,5 +10,5 @@
     "esModuleInterop": true,
     "types": ["node"]
   },
-  "include": ["src/data/grocery.ts", "src/data/schema.ts", "src/data/submission.ts", "src/data/*.test.ts"]
+  "include": ["src/data/backup.ts", "src/data/grocery.ts", "src/data/schema.ts", "src/data/submission.ts", "src/data/*.test.ts"]
 }

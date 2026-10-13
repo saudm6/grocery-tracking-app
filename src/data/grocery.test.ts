@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { backup, DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import type { SQLiteBindValue } from 'expo-sqlite';
+import { backupFileName, importBackup } from './backup';
 import { cameraCode, handedOffCode, handOffCode, normalizeCode, type CodeInput } from './code';
 import { createGrocery, formatOMR, initializeDatabase, lineTotal, parseOMR, parseQuantity, referenceNameKey, validateDate, validateMonth, type Database, type Executor, type Grouping, type ProductInput, type PurchaseCorrection, type PurchaseInput } from './grocery';
 import { migrations } from './schema';
@@ -2555,4 +2556,103 @@ test('Inflation reads one coherent real-connection history and current-label sna
       assert.deepEqual(await reopened.db.getFirstAsync('PRAGMA integrity_check'), { integrity_check: 'ok' });
     } finally { reopened.close(); }
   } finally { other.close(); f.cleanup(); }
+});
+
+async function copyDatabase(from: string, to: string) {
+  const source = new DatabaseSync(from);
+  try { await backup(source, to); } finally { source.close(); }
+}
+// Mirrors the Backup page: the picked file is copied aside, opened as its own database, then backed up over the live one.
+async function importFile(live: { path: string }, file: string, versions: readonly string[] = migrations) {
+  const folder = mkdtempSync(join(tmpdir(), 'grocery-import-'));
+  const copy = join(folder, 'backup.db');
+  copyFileSync(file, copy);
+  const candidate = open(copy);
+  try { return await importBackup(candidate.db, () => copyDatabase(copy, live.path), versions); } finally { candidate.close(); rmSync(folder, { recursive: true }); }
+}
+const rowCounts = async (db: Executor) => Object.fromEntries(Object.entries(await storedState(db)).map(([table, rows]) => [table, rows.length]));
+
+test('a backup restores every record into a fresh database, and importing it replaces later changes without merging', async () => {
+  const f = await correctionFixture();
+  const fresh = await fixture();
+  const folder = mkdtempSync(join(tmpdir(), 'grocery-backup-'));
+  try {
+    assert.equal(backupFileName('2026-10-12'), 'grocery-backup-2026-10-12.db');
+    const file = join(folder, backupFileName('2026-10-12'));
+    await copyDatabase(f.path, file);
+    // Like Expo's serialized export, the file keeps the WAL flag, which stops SQLite from deserializing it in memory.
+    assert.deepEqual([...readFileSync(file).subarray(18, 20)], [2, 2]);
+    const saved = await storedState(f.db);
+    const codes = await codeBytes(f.db);
+    assert.deepEqual(await importFile(fresh, file), { purchases: 2, products: 2 });
+    assert.deepEqual(await rowCounts(fresh.db), { brands: 2, categories: 2, subcategories: 2, stores: 2, products: 2, product_codes: 3, purchases: 2, price_history: 2 });
+    assert.deepEqual(await storedState(fresh.db), saved);
+    assert.deepEqual(await codeBytes(fresh.db), codes);
+    const restored = createGrocery(fresh.db, now);
+    assert.deepEqual([(await restored.getMonth('2026-09')).total, (await restored.getMonth('2026-10')).total], [4000, 2500]);
+    const grocery = createGrocery(f.db, now);
+    await grocery.recordPurchase(input({ product: { id: 2 }, store: { id: 1 }, unitPrice: '5', quantity: '1' }));
+    assert.equal((await grocery.getMonth('2026-10')).total, 7500);
+    await importFile(f, file);
+    assert.deepEqual(await storedState(f.db), saved);
+    assert.deepEqual([(await grocery.getMonth('2026-09')).total, (await grocery.getMonth('2026-10')).total], [4000, 2500]);
+    await grocery.recordPurchase(input({ product: { id: 2 }, store: { id: 1 }, unitPrice: '1', quantity: '1' }));
+    assert.equal((await grocery.getMonth('2026-10')).total, 3500);
+    assert.deepEqual(await f.db.getFirstAsync('PRAGMA journal_mode'), { journal_mode: 'wal' });
+    assert.deepEqual(await f.db.getFirstAsync('PRAGMA integrity_check'), { integrity_check: 'ok' });
+  } finally { f.cleanup(); fresh.cleanup(); rmSync(folder, { recursive: true }); }
+});
+test('an older backup is upgraded on its copy before replacing data, and a failed upgrade keeps the current data', async () => {
+  const old = await fixture(migrations.slice(0, 1));
+  const live = await correctionFixture();
+  const folder = mkdtempSync(join(tmpdir(), 'grocery-backup-'));
+  try {
+    await createGrocery(old.db, now).recordPurchase(input());
+    const file = join(folder, backupFileName('2026-10-12'));
+    await copyDatabase(old.path, file);
+    const saved = await storedState(live.db);
+    await assert.rejects(importFile(live, file, [migrations[0], 'INVALID SQL;']), { message: 'This backup could not be upgraded to this version of the app.' });
+    assert.deepEqual(await storedState(live.db), saved);
+    assert.deepEqual(await importFile(live, file), { purchases: 1, products: 1 });
+    assert.deepEqual(await live.db.getFirstAsync('PRAGMA user_version'), { user_version: 2 });
+    assert.deepEqual(await rowCounts(live.db), { brands: 1, categories: 1, subcategories: 0, stores: 1, products: 1, product_codes: 0, purchases: 1, price_history: 1 });
+    assert.deepEqual([(await createGrocery(live.db, now).getMonth('2026-09')).total, (await createGrocery(live.db, now).getMonth('2026-10')).total], [0, 3]);
+    const picked = new DatabaseSync(file);
+    try { assert.deepEqual({ ...picked.prepare('PRAGMA user_version').get() }, { user_version: 1 }); } finally { picked.close(); }
+  } finally { old.cleanup(); live.cleanup(); rmSync(folder, { recursive: true }); }
+});
+test('import rejects non-SQLite, damaged, foreign, unversioned and too-new files and keeps the current data', async () => {
+  const f = await correctionFixture();
+  const folder = mkdtempSync(join(tmpdir(), 'grocery-backup-'));
+  try {
+    const saved = await storedState(f.db);
+    const path = (name: string) => join(folder, name);
+    await copyDatabase(f.path, path('good.db'));
+    writeFileSync(path('notes.db'), 'Milk 2.500 OMR\n');
+    const damaged = readFileSync(path('good.db'));
+    const root = (await f.db.getFirstAsync<{ rootpage: number }>("SELECT rootpage FROM sqlite_master WHERE name = 'purchases'"))!.rootpage;
+    damaged.fill(0xff, 4096 * (root - 1), 4096 * (root - 1) + 64);
+    writeFileSync(path('damaged.db'), damaged);
+    for (const [name, sql, from] of [
+      ['foreign.db', 'CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); PRAGMA user_version = 1;'],
+      ['unversioned.db', 'PRAGMA user_version = 0;', path('good.db')],
+      ['too-new.db', `PRAGMA user_version = ${migrations.length + 1};`, path('good.db')],
+    ]) {
+      if (from) await copyDatabase(from, path(name));
+      const connection = new DatabaseSync(path(name));
+      try { connection.exec(sql); } finally { connection.close(); }
+    }
+    for (const [name, message] of [
+      ['notes.db', 'This file is not a grocery backup.'],
+      ['damaged.db', 'This backup file is damaged.'],
+      ['foreign.db', 'This file is not a grocery backup.'],
+      ['unversioned.db', 'This file is not a grocery backup.'],
+      ['too-new.db', 'This backup comes from a newer version of the app. Update the app, then import it again.'],
+    ]) {
+      await assert.rejects(importFile(f, path(name)), { message }, name);
+      assert.deepEqual(await storedState(f.db), saved, name);
+    }
+    assert.deepEqual(await importFile(f, path('good.db')), { purchases: 2, products: 2 });
+    assert.equal((await createGrocery(f.db, now).getMonth('2026-10')).total, 2500);
+  } finally { f.cleanup(); rmSync(folder, { recursive: true }); }
 });
