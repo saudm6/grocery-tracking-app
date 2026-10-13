@@ -174,7 +174,10 @@ export function ProductChooser({ month, subcategories, onChoose, disabled, visib
       {permission === null ? <Text>Camera permission is loading. You can use manual search or code entry.</Text> : null}
       <Action label={capture.status === 'captured' ? 'Retake code' : capture.status === 'requesting' ? 'Requesting camera permission…' : capture.status === 'preview' ? 'Camera open' : capture.status === 'error' ? 'Retry camera' : 'Open camera'} disabled={disabled || capture.status === 'requesting' || capture.status === 'preview' || (!!permission && !permission.granted && !permission.canAskAgain)} onPress={() => { void openCamera(); }} />
       {capture.status === 'error' ? <ErrorMessage message={capture.message} /> : null}
-      {permission && !permission.granted && !permission.canAskAgain ? <Action label="Open camera permission settings" disabled={disabled} onPress={openSettings} /> : null}
+      {permission && !permission.granted && !permission.canAskAgain ? <>
+        {capture.status === 'error' ? null : <Text>Camera access is off for this app. Turn it on in Settings, or use manual search and code entry below.</Text>}
+        <Action label="Open camera permission settings" disabled={disabled} onPress={openSettings} />
+      </> : null}
       {preview ? <CameraView key={capture.generation} style={{ width: '100%', height: 260 }} facing="back" autofocus="on" barcodeScannerSettings={{ barcodeTypes: ['upc_a', 'upc_e', 'ean8', 'ean13', 'qr'] }} onBarcodeScanned={scanned} onMountError={() => {
         if (mounted.current && captureRef.current.generation === capture.generation && previewId.current === previewSession && captureRef.current.status === 'preview') changeCapture({ status: 'error', generation: capture.generation, message: 'The camera preview could not start. Your entries are kept. Retry or use manual search and code entry.' });
       }} /> : null}
