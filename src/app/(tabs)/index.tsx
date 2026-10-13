@@ -1,7 +1,7 @@
-import { Link, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, ScrollView, Text } from 'react-native';
-import { Action, ErrorMessage, Field } from '../../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../../components/form';
 import { formatOMR, localDate, validateMonth, type HomeAnalytics } from '../../data/grocery';
 import { useGrocery } from '../../data/provider';
 
@@ -28,20 +28,22 @@ export default function Home() {
     <Field label="Year and month (YYYY-MM)" value={draftMonth} onChangeText={setDraftMonth} autoCapitalize="none" autoCorrect={false} returnKeyType="done" onSubmitEditing={chooseMonth} />
     <Action label="Show month" onPress={chooseMonth} />
     {monthError ? <ErrorMessage message={monthError} /> : null}
-    <Link href="/spending" accessibilityLabel="Open Total Spending" style={{ fontSize: 18, color: '#21643c', paddingVertical: 12 }}>Open Total Spending</Link>
+    <Action label="Open Total Spending" onPress={() => pushScreen('/spending')} />
     {read.status === 'loading' ? <ActivityIndicator accessibilityLabel="Loading monthly analytics" /> : read.status === 'error' ? <>
       <ErrorMessage message={read.message} />
       <Text>Your month selection is kept. Retry to read the saved purchases.</Text>
       <Action label="Retry monthly analytics" onPress={() => setSelection({ month })} />
+    </> : read.report.purchaseCount === 0 ? <>
+      <Text selectable accessibilityRole="header" style={{ fontSize: 24, fontVariant: ['tabular-nums'] }}>{read.report.month} total · {formatOMR(read.report.total)} OMR</Text>
+      <Text>No purchases in {read.report.month} yet. Open Total Spending to record one.</Text>
     </> : <>
       <Text selectable accessibilityRole="header" style={{ fontSize: 24, fontVariant: ['tabular-nums'] }}>{read.report.month} total · {formatOMR(read.report.total)} OMR</Text>
-      {read.report.purchaseCount === 0 ? <Text>No purchases in this month. Open Total Spending to record one.</Text> : null}
-      {read.report.previousMonth === null ? <Text>Prior-month comparison is unavailable before 0001-01.</Text> : <>
+      {read.report.previousMonth === null ? <Text>Prior-month comparison is unavailable before 0001-01.</Text>
+        : read.report.percentChange === null ? <Text>{read.report.previousMonth} has no paid spending to compare with.</Text> : <>
         <Text selectable accessibilityRole="header" style={{ fontSize: 22 }}>Compared with {read.report.previousMonth}</Text>
         <Text selectable>Previous total · {formatOMR(read.report.previousTotal!)} OMR</Text>
         <Text selectable>Change · {read.report.difference! > 0 ? '+' : read.report.difference! < 0 ? '-' : ''}{formatOMR(Math.abs(read.report.difference!))} OMR</Text>
-        {read.report.percentChange === null ? <Text>The prior month has no paid spending. Percentage comparison is unavailable.</Text>
-          : <Text selectable>Percentage change · {read.report.percentChange > 0 ? '+' : ''}{read.report.percentChange.toFixed(2)}%</Text>}
+        <Text selectable>Percentage change · {read.report.percentChange > 0 ? '+' : ''}{read.report.percentChange.toFixed(2)}%</Text>
       </>}
       <Text accessibilityRole="header" style={{ fontSize: 22 }}>Spending by category</Text>
       {read.report.categories.length === 0 ? <Text>No category spending in this month.</Text> : read.report.categories.map((category) =>

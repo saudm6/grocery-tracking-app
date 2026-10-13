@@ -1,8 +1,8 @@
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from 'react';
 import { ActivityIndicator, AppState, Text, View } from 'react-native';
 import { CodeScanner, type CodeScannerHandle } from './code-scanner';
-import { Action, ErrorMessage, Field } from './form';
+import { Action, ErrorMessage, Field, pushScreen } from './form';
 import { ProductRow } from './product-row';
 import type { CodeFormat, CodeInput } from '../data/code';
 import type { ProductSummary, SubcategoryRow } from '../data/grocery';
@@ -21,7 +21,7 @@ function SavedProductChoice({ product, month, disabled, onChoose }: {
   return <ProductRow product={product}>
     {product.archived ? <>
       <Text>Reactivate this existing product from details before selecting it.</Text>
-      <Action label={`Open archived product ${product.name}`} disabled={disabled} onPress={() => router.push({ pathname: '/product/[id]', params: { id: product.id, month } })} />
+      <Action label={`Open archived product ${product.name}`} disabled={disabled} onPress={() => pushScreen({ pathname: '/product/[id]', params: { id: product.id, month } })} />
     </> : <Action label={`Use product ${product.name} · Product ${product.id}`} disabled={disabled} onPress={() => onChoose(product.id)} />}
   </ProductRow>;
 }

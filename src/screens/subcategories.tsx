@@ -1,7 +1,7 @@
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text, View } from 'react-native';
-import { Action, ErrorMessage, Field } from '../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../components/form';
 import type { References, SubcategoryRow } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 import { createSubmission } from '../data/submission';
@@ -37,7 +37,7 @@ function SubcategoryEditor({ record, references, readError, refresh, onSaved, on
     {record ? <Text>Moving changes the category for this subcategory’s current products and all purchases recorded under it. Inflation follows each product’s current group.</Text> : null}
     {references.categories.length ? <Action label={choosing ? 'Close parent category choices' : 'Choose parent category'} disabled={saving || !!readError} onPress={() => setChoosing((open) => !open)} /> : <Text>Add a category first. Your subcategory name stays here while you visit Categories.</Text>}
     {choosing ? references.categories.map((category) => <Action key={category.id} label={`Use parent category ${category.name}`} disabled={saving || !!readError} onPress={() => { setParentId(category.id); setChoosing(false); }} />) : null}
-    <Action label="Manage parent categories" disabled={saving} onPress={() => router.push('/categories')} />
+    <Action label="Manage parent categories" disabled={saving} onPress={() => pushScreen('/categories')} />
     {error ? <ErrorMessage message={error} /> : null}
     <Action label={saving ? 'Saving subcategory…' : 'Save subcategory'} disabled={saving || !!readError} onPress={() => { void save(); }} />
     <Action label="Cancel subcategory edit" disabled={saving} onPress={onCancel} />
@@ -67,7 +67,7 @@ export default function Subcategories() {
         <Action label="Add subcategory" disabled={!references || !!readError} onPress={() => { setNotice(''); setEditor('new'); }} />
         {references?.subcategories.length === 0 ? <Text>No subcategories yet. Add one here or enter a new subcategory while saving a product or purchase.</Text> : references?.subcategories.map((row) => <View key={row.id} style={{ padding: 16, gap: 8, borderWidth: 1, borderColor: '#657469', borderRadius: 10, backgroundColor: '#fff' }}>
           <Text selectable style={{ fontSize: 20, color: '#17251b' }}>{row.category} / {row.name}</Text>
-          <Action label={`Open subcategory ${row.category} / ${row.name}`} disabled={!!readError} onPress={() => router.push({ pathname: '/subcategory/[id]', params: { id: row.id } })} />
+          <Action label={`Open subcategory ${row.category} / ${row.name}`} disabled={!!readError} onPress={() => pushScreen({ pathname: '/subcategory/[id]', params: { id: row.id } })} />
           <Action label={`Rename or move subcategory ${row.category} / ${row.name}`} disabled={!!readError} onPress={() => { setNotice(''); setEditor(row); }} />
         </View>)}
       </>}

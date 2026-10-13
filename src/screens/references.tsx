@@ -1,7 +1,7 @@
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text, View } from 'react-native';
-import { Action, ErrorMessage, Field } from '../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../components/form';
 import type { ReferenceRow, SubcategoryRow } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 import { createSubmission } from '../data/submission';
@@ -67,10 +67,10 @@ export default function ReferencesPage({ kind }: { kind: Kind }) {
           <Action label={`Rename ${noun} ${row.name}`} disabled={!!readError} onPress={() => { setNotice(''); setEditor(row); }} />
           {kind === 'categories' ? <>
             <Text>Subcategories</Text>
-            {children.some((child) => child.categoryId === row.id) ? children.filter((child) => child.categoryId === row.id).map((child) => <Action key={child.id} label={`Open subcategory ${row.name} / ${child.name}`} disabled={!!readError} onPress={() => router.push({ pathname: '/subcategory/[id]', params: { id: child.id } })} />) : <Text>No subcategories in this category yet.</Text>}
+            {children.some((child) => child.categoryId === row.id) ? children.filter((child) => child.categoryId === row.id).map((child) => <Action key={child.id} label={`Open subcategory ${row.name} / ${child.name}`} disabled={!!readError} onPress={() => pushScreen({ pathname: '/subcategory/[id]', params: { id: child.id } })} />) : <Text>No subcategories in this category yet.</Text>}
           </> : null}
         </View>)}
-        {kind === 'categories' ? <Action label="Manage subcategories" onPress={() => router.push('/subcategories')} /> : null}
+        {kind === 'categories' ? <Action label="Manage subcategories" onPress={() => pushScreen('/subcategories')} /> : null}
       </>}
     </ScrollView>
   </KeyboardAvoidingView>;

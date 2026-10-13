@@ -2,7 +2,7 @@ import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text } from 'react-native';
 import { CodeScanner } from '../components/code-scanner';
-import { Action, ErrorMessage, Field } from '../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../components/form';
 import { GroupingField } from '../components/grouping-field';
 import { ReferenceField } from '../components/reference-field';
 import { handedOffCode, type CodeFormat, type CodeInput } from '../data/code';
@@ -87,7 +87,7 @@ function ProductEditor({ product, references, readError, refresh, month, initial
       <Field label={format === 'qr' ? 'QR content (exact text)' : 'Product code (including check digit)'} value={code} onChangeText={(value) => { clearOwner(); setCode(value); }} editable={editing} autoCapitalize="none" autoCorrect={false} multiline={format === 'qr'} />
       {format === 'qr' ? <Text selectable>QR preview · {JSON.stringify(code)}</Text> : <Text>Enter all digits without spaces or separators. UPC-E needs its full 8 digits.</Text>}
     </> : null}
-    {owner ? <><Text>This code identifies {owner.name}{owner.archived ? ' · Archived. Reactivate its existing identity from details.' : '.'}</Text><Action label={`Open code owner ${owner.name}`} onPress={() => router.push({ pathname: '/product/[id]', params: { id: owner.id, ...(month === undefined ? {} : { month }) } })} /></> : null}
+    {owner ? <><Text>This code identifies {owner.name}{owner.archived ? ' · Archived. Reactivate its existing identity from details.' : '.'}</Text><Action label={`Open code owner ${owner.name}`} onPress={() => pushScreen({ pathname: '/product/[id]', params: { id: owner.id, ...(month === undefined ? {} : { month }) } })} /></> : null}
     {ownerError ? <><ErrorMessage message={ownerError} /><Action label="Retry code owner lookup" onPress={() => checkOwner(current)} /></> : null}
     {error ? <ErrorMessage message={error} /> : null}
     <Action label={saving ? 'Saving product…' : 'Save product'} disabled={!editing || !!readError} onPress={() => { void save(); }} />

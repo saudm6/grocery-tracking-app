@@ -1,7 +1,7 @@
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, Text } from 'react-native';
-import { Action, ErrorMessage, Field } from '../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../components/form';
 import { ProductRow } from '../components/product-row';
 import type { ProductSummary } from '../data/grocery';
 import { useGrocery } from '../data/provider';
@@ -24,10 +24,10 @@ export default function Products() {
     <Text>Find a product by name. Catalog saves keep your month totals unchanged.</Text>
     <Field label="Search product names" value={search} onChangeText={setSearch} autoCorrect={false} returnKeyType="search" />
     <Action label={includeArchived ? 'Hide archived products' : 'Show archived products'} onPress={() => setIncludeArchived((shown) => !shown)} />
-    <Action label="Add product" onPress={() => router.push('/product-edit')} />
+    <Action label="Add product" onPress={() => pushScreen('/product-edit')} />
     {error ? <><ErrorMessage message={error} /><Action label="Retry products" onPress={refresh} /></> : rows === null ? <ActivityIndicator accessibilityLabel="Loading products" /> : null}
     {rows?.length === 0 ? <Text>{search.trim() ? 'No matching products. Change the search or add a product.' : 'No products here yet. Add one with or without a code.'}</Text> : rows?.map((product) => <ProductRow key={product.id} product={product}>
-      <Action label={`Open ${product.archived ? 'archived ' : ''}product ${product.name}`} onPress={() => router.push({ pathname: '/product/[id]', params: { id: product.id } })} />
+      <Action label={`Open ${product.archived ? 'archived ' : ''}product ${product.name}`} onPress={() => pushScreen({ pathname: '/product/[id]', params: { id: product.id } })} />
     </ProductRow>)}
   </ScrollView>;
 }

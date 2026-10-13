@@ -1,7 +1,7 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text } from 'react-native';
-import { Action, ErrorMessage, Field } from '../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../components/form';
 import { GroupingField } from '../components/grouping-field';
 import { ProductChooser } from '../components/product-chooser';
 import { PriceObservationCard } from '../components/price-observation-card';
@@ -124,7 +124,7 @@ function PurchaseEditor({ purchase, references, readReady, refresh, onCommitted 
       {productRead === 'loading' ? <ActivityIndicator accessibilityLabel="Loading replacement product" /> : null}
       {productError ? <><ErrorMessage message={productError} /><Action label="Retry replacement product" disabled={saving} onPress={refreshProduct} /></> : null}
       {product?.archived ? <ErrorMessage message="This replacement is archived. Reactivate its existing identity from details before saving. Your paid entries are kept." /> : null}
-      {product ? <Action label={product.archived ? 'Open archived replacement product' : 'Open replacement product details'} disabled={saving || confirmingDelete} onPress={() => router.push({ pathname: '/product/[id]', params: { id: product.id, month: draft.month } })} /> : null}
+      {product ? <Action label={product.archived ? 'Open archived replacement product' : 'Open replacement product details'} disabled={saving || confirmingDelete} onPress={() => pushScreen({ pathname: '/product/[id]', params: { id: product.id, month: draft.month } })} /> : null}
       <Action label="Keep original recorded product and grouping" disabled={saving || confirmingDelete} onPress={keepRecorded} />
     </>}
     <Text>Grouping here corrects this purchase only. Other purchases and the product&apos;s current grouping are kept.</Text>
@@ -149,7 +149,7 @@ function PurchaseEditor({ purchase, references, readReady, refresh, onCommitted 
       <Text accessibilityRole="alert">Delete recorded purchase {purchase.id} of {purchase.product} in {purchase.month}, worth {formatOMR(purchase.lineTotal)} OMR? This removes spending and discards unsaved corrections. Price history remains with its own product, price, store and period.</Text>
       <Action label={saving ? 'Deleting purchase…' : 'Delete receipt only'} disabled={saving || !readReady} onPress={() => { void commit('delete'); }} />
       {observation?.source === 'receipt' ? <>
-        <Text>Delete and apply inflation also removes linked receipt observation {observation.id} for {observation.product}. Remaining history is recalculated. Today&apos;s saved price and store stay unchanged.</Text>
+        <Text>Delete and apply inflation also removes this receipt&apos;s price history entry, observation {observation.id} for {observation.product}. Remaining history is recalculated. Today&apos;s saved price and store stay unchanged.</Text>
         <Action label="Delete and apply inflation" disabled={saving || !readReady} onPress={() => { void commit('deleteApply'); }} />
       </> : null}
       <Action label="Cancel purchase deletion" disabled={saving} onPress={() => setConfirmingDelete(false)} />

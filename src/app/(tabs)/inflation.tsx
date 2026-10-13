@@ -1,7 +1,7 @@
-import { router, useFocusEffect } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, Text } from 'react-native';
-import { Action, ErrorMessage, Field } from '../../components/form';
+import { Action, ErrorMessage, Field, pushScreen } from '../../components/form';
 import { PriceChart } from '../../components/price-chart';
 import { ProductRow } from '../../components/product-row';
 import { formatOMR, localDate, validateMonth, type InflationProduct, type ReferenceRow } from '../../data/grocery';
@@ -42,6 +42,8 @@ export default function Inflation() {
       setChoosingCategory(false);
     } catch (error) { setFilterError(error instanceof Error ? error.message : 'Choose a valid month range.'); }
   };
+  // Every product has a category, so no categories means no prices are recorded yet.
+  const firstUse = categories.length === 0;
   const categoryLabel = (categoryId: number | null) => categoryId === null ? 'All categories' : categories.find((category) => category.id === categoryId)?.name ?? `Category ${categoryId}`;
   return <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 20, gap: 16, paddingBottom: 40 }}>
     <Text>Explore counted changes in recorded prices. Saved-price observations and explicitly applied receipts use their effective months. Spending and today’s saved defaults are separate.</Text>
@@ -58,11 +60,14 @@ export default function Inflation() {
     {read.status === 'loading' ? <ActivityIndicator accessibilityLabel="Loading recorded price changes" /> : read.status === 'error' ? <>
       <ErrorMessage message={read.message} />
       <Action label="Retry inflation report" onPress={() => { readId.current++; setRead({ status: 'loading' }); setSelection({ ...selection }); }} />
+    </> : firstUse ? <>
+      <Text>No prices recorded yet. Record purchases in Total Spending to track price changes.</Text>
+      <Action label="Open Total Spending" onPress={() => pushScreen('/spending')} />
     </> : <>
       <Text>Ranked by positive counted net increase. Included decreases offset increases. Categories reflect the product’s current grouping; archived products keep their history.</Text>
       {read.products.length === 0 ? <>
         <Text>No positive counted net increases in this range. Try another range or category. Product details show all observations and their inflation status.</Text>
-        <Action label="Open products" onPress={() => router.push('/products')} />
+        <Action label="Open products" onPress={() => pushScreen('/products')} />
       </> : read.products.map((product, index) => <ProductRow key={product.id} product={product}>
         <Text selectable>Rank {index + 1} · Current category · {product.category}{product.subcategory ? ` / ${product.subcategory}` : ''}</Text>
         <Text selectable style={{ fontSize: 22, fontVariant: ['tabular-nums'] }}>Counted net increase · {formatOMR(product.increase)} OMR</Text>
@@ -70,7 +75,7 @@ export default function Inflation() {
         <Text selectable>Reference price · {formatOMR(product.referencePrice)} OMR · Actual predecessor of the first included change in this range</Text>
         <Text selectable>Price at period end · {formatOMR(product.periodEndPrice)} OMR · Latest actual observation through {selection.endMonth}, including Not inflation prices</Text>
         <PriceChart points={product.points} />
-        <Action label={`Open product ${product.name} · Full price history`} onPress={() => router.push({ pathname: '/product/[id]', params: { id: product.id } })} />
+        <Action label={`Open product ${product.name} · Full price history`} onPress={() => pushScreen({ pathname: '/product/[id]', params: { id: product.id } })} />
       </ProductRow>)}
     </>}
   </ScrollView>;

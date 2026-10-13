@@ -1,7 +1,7 @@
-import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, Text, View } from 'react-native';
-import { Action, ErrorMessage } from '../components/form';
+import { Action, ErrorMessage, pushScreen } from '../components/form';
 import { formatOMR, type SubcategoryDetails } from '../data/grocery';
 import { useGrocery } from '../data/provider';
 import { createSubmission } from '../data/submission';
@@ -71,7 +71,7 @@ export default function Subcategory() {
       <Text accessibilityRole="header" style={{ fontSize: 22 }}>Current linked products</Text>
       {details.products.length === 0 ? <Text>No products are currently assigned to this subcategory. Earlier purchases still appear in recorded spending below.</Text> : details.products.map((product) => <View key={product.id} style={{ gap: 6 }}>
         <Text selectable>{product.name} · {product.brand ?? 'No brand'}{product.archived ? ' · Archived' : ''}</Text>
-        <Action label={`Open linked product ${product.name} · Product ${product.id}`} disabled={!!error} onPress={() => router.push({ pathname: '/product/[id]', params: { id: product.id } })} />
+        <Action label={`Open linked product ${product.name} · Product ${product.id}`} disabled={!!error} onPress={() => pushScreen({ pathname: '/product/[id]', params: { id: product.id } })} />
       </View>)}
       <Text accessibilityRole="header" style={{ fontSize: 22 }}>All recorded spending</Text>
       <Text selectable>Total · {formatOMR(details.total)} OMR</Text>
@@ -80,7 +80,7 @@ export default function Subcategory() {
         <Text selectable accessibilityRole="header" style={{ fontSize: 20 }}>{brand.brand ?? 'No brand'} · {formatOMR(brand.total)} OMR</Text>
         {brand.products.map((product) => <View key={product.productId} style={{ gap: 6 }}>
           <Text selectable>{product.product} · Product {product.productId} · {formatOMR(product.total)} OMR</Text>
-          <Action label={`Open recorded product ${product.product} · Product ${product.productId} · ${brand.brand ?? 'No brand'}`} disabled={!!error} onPress={() => router.push({ pathname: '/product/[id]', params: { id: product.productId } })} />
+          <Action label={`Open recorded product ${product.product} · Product ${product.productId} · ${brand.brand ?? 'No brand'}`} disabled={!!error} onPress={() => pushScreen({ pathname: '/product/[id]', params: { id: product.productId } })} />
         </View>)}
       </View>)}
     </> : null}
