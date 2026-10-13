@@ -5,6 +5,16 @@ export type NormalizedCode =
   | { namespace: 'retail'; format: RetailFormat; original: string; key: string }
   | { namespace: 'qr'; format: 'qr'; original: string; key: string };
 
+export function cameraCode(result: { type: string; data: string; raw?: string }, platform: string): CodeInput {
+  const format = result.type;
+  if (format !== 'upc_a' && format !== 'upc_e' && format !== 'ean8' && format !== 'ean13' && format !== 'qr') throw new Error('This code format is not supported. Choose a format and type the code instead.');
+  let value = platform === 'android' && typeof result.raw === 'string' ? result.raw : result.data;
+  if (typeof value !== 'string') throw new Error('The camera did not return code text. Type the code instead.');
+  // Expo iOS removes the leading zero from UPC-A reported as EAN-13.
+  if (platform === 'ios' && format === 'ean13' && /^[0-9]{12}$/.test(value)) value = `0${value}`;
+  return { format, value };
+}
+
 export function normalizeCode(input: CodeInput): NormalizedCode {
   if (typeof input?.value !== 'string') throw new Error('Enter a code and choose its format.');
   const { format, value } = input;

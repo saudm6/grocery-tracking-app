@@ -9,6 +9,10 @@
     "userInterfaceStyle": "light",
     "ios": { "supportsTablet": true },
     "android": { "softwareKeyboardLayoutMode": "resize", "package": "com.saudm6.grocerytracker" },
-    "plugins": ["expo-router", "expo-sqlite"]
+    "plugins": ["expo-router", "expo-sqlite", ["expo-camera", {
+      "cameraPermission": "Allow Grocery tracker to scan product barcodes and QR codes.",
+      "microphonePermission": false,
+      "recordAudioAndroid": false
+    }]]
   }
 }

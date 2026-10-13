@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test } from 'node:test';
 import type { SQLiteBindValue } from 'expo-sqlite';
-import { normalizeCode, type CodeInput } from './code';
+import { cameraCode, normalizeCode, type CodeInput } from './code';
 import { createGrocery, formatOMR, initializeDatabase, lineTotal, parseOMR, parseQuantity, referenceNameKey, validateDate, validateMonth, type Database, type Executor, type Grouping, type ProductInput, type PurchaseCorrection, type PurchaseInput } from './grocery';
 import { migrations } from './schema';
 import { createSubmission } from './submission';
@@ -1166,6 +1166,82 @@ test('typed retail formats validate literal check digits, expand all UPC-E branc
     { format: 'ean8', value: 'abcdefgh' }, { value: '95012346' },
   ]) assert.throws(() => normalizeCode(code as CodeInput));
   for (let system = 2; system <= 9; system++) assert.throws(() => normalizeCode({ format: 'upc_e', value: `${system}2345670` }), /number system/);
+});
+
+test('camera adaptation preserves native format/raw text and repairs only the documented iOS EAN13 representation', () => {
+  assert.deepEqual(cameraCode({ type: 'ean13', data: '036000291452' }, 'ios'), { format: 'ean13', value: '0036000291452' });
+  assert.deepEqual(cameraCode({ type: 'ean13', data: '6291041500213' }, 'ios'), { format: 'ean13', value: '6291041500213' });
+  assert.deepEqual(cameraCode({ type: 'ean13', data: '036000291452' }, 'android'), { format: 'ean13', value: '036000291452' });
+  assert.throws(() => normalizeCode(cameraCode({ type: 'ean13', data: '036000291452' }, 'android')), /13 digits/);
+  for (const platform of ['android', 'ios']) {
+    assert.deepEqual(normalizeCode(cameraCode({ type: 'upc_e', data: '01234558' }, platform)), { namespace: 'retail', format: 'upc_e', original: '01234558', key: '00012345000058' });
+    assert.deepEqual(normalizeCode(cameraCode({ type: 'ean8', data: '01234558' }, platform)), { namespace: 'retail', format: 'ean8', original: '01234558', key: '00000001234558' });
+  }
+  assert.throws(() => normalizeCode(cameraCode({ type: 'upc_e', data: '0012345000058' }, 'android')), /8 digits/);
+  assert.throws(() => normalizeCode(cameraCode({ type: 'upc_a', data: '036000291453' }, 'android')), /check digit/);
+  assert.throws(() => cameraCode({ type: 'code128', data: '036000291452' }, 'android'), /not supported/);
+  for (const value of ['\ufeffQR\0suffix ', ' grocery:é e\u0301 🛒 ', 'https://example.invalid/opaque', '036000291452', 'A'.repeat(4096)]) {
+    assert.deepEqual(cameraCode({ type: 'qr', data: 'display value', raw: value }, 'android'), { format: 'qr', value });
+    assert.deepEqual(cameraCode({ type: 'qr', data: value, raw: 'not an iOS field' }, 'ios'), { format: 'qr', value });
+    assert.deepEqual(normalizeCode(cameraCode({ type: 'qr', data: 'display value', raw: value }, 'android')), { namespace: 'qr', format: 'qr', original: value, key: value });
+  }
+  assert.deepEqual(cameraCode({ type: 'qr', data: '\0fallback' }, 'android'), { format: 'qr', value: '\0fallback' });
+  for (const raw of ['', 'A'.repeat(4097), '\ud800']) assert.throws(() => normalizeCode(cameraCode({ type: 'qr', data: 'valid display must not replace raw', raw }, 'android')));
+});
+
+test('camera and typed lookup retain exact canonical owners without writes, including primary preference and archived identity', async () => {
+  const f = await fixture();
+  try {
+    const grocery = createGrocery(f.db, now);
+    await grocery.saveProduct(catalog({ name: 'Scanned milk', brand: { name: 'Scanned brand' }, grouping: { subcategory: { name: 'Milk', parentCategory: { name: 'Dairy' } } }, savedPrice: '2.000', savedStore: { name: 'Saved shop' }, code: { format: 'upc_a', value: '036000291452' } }));
+    await grocery.saveProduct(catalog({ name: 'Preferred numeric QR milk', brand: { name: 'Preferred brand' }, grouping: { subcategory: { id: 1 } }, savedPrice: '3.000', savedStore: { id: 1 }, code: { format: 'qr', value: '036000291452' } }));
+    await f.db.execAsync('UPDATE subcategories SET primary_brand_id = 2 WHERE id = 1;');
+    await grocery.saveStore({ name: 'Paid shop' });
+    const qr = '\ufeffScan\0tail ';
+    for (const [name, value] of [['Exact control QR', qr], ['NUL prefix owner', '\ufeffScan'], ['No BOM owner', 'Scan\0tail ']]) await grocery.saveProduct(catalog({ name, grouping: { category: { id: 1 } }, code: { format: 'qr', value } }));
+    const tables = ['brands', 'categories', 'subcategories', 'stores', 'products', 'product_codes', 'purchases', 'price_history'];
+    const before = await Promise.all(tables.map((table) => f.db.getAllAsync(`SELECT * FROM ${table} ORDER BY id`)));
+    const expected = { id: 1, name: 'Scanned milk', brand: 'Scanned brand', archived: false };
+    assert.deepEqual(await grocery.lookupCode(cameraCode({ type: 'upc_a', data: '036000291452' }, 'android')), expected);
+    assert.deepEqual(await grocery.lookupCode(cameraCode({ type: 'ean13', data: '0036000291452' }, 'android')), expected);
+    assert.deepEqual(await grocery.lookupCode(cameraCode({ type: 'ean13', data: '036000291452' }, 'ios')), expected);
+    assert.deepEqual(await grocery.lookupCode({ format: 'upc_a', value: '036000291452' }), expected);
+    assert.deepEqual(await grocery.lookupCode(cameraCode({ type: 'qr', data: '036000291452' }, 'android')), { id: 2, name: 'Preferred numeric QR milk', brand: 'Preferred brand', archived: false });
+    assert.deepEqual(await grocery.lookupCode(cameraCode({ type: 'qr', data: '\ufeffScan', raw: qr }, 'android')), { id: 3, name: 'Exact control QR', brand: null, archived: false });
+    assert.equal((await grocery.lookupCode({ format: 'qr', value: '\ufeffScan' }))?.id, 4);
+    assert.equal((await grocery.lookupCode(cameraCode({ type: 'qr', data: 'Scan\0tail ' }, 'ios')))?.id, 5);
+    assert.equal(await grocery.lookupCode(cameraCode({ type: 'upc_a', data: '123456789012' }, 'android')), null);
+    assert.equal(await grocery.lookupCode(cameraCode({ type: 'qr', data: 'grocery:unknown' }, 'android')), null);
+    await assert.rejects(grocery.lookupCode(cameraCode({ type: 'upc_a', data: '036000291453' }, 'android')), /check digit/);
+    await assert.rejects(grocery.lookupCode(cameraCode({ type: 'qr', data: 'A'.repeat(4097) }, 'android')), /4,096/);
+    assert.deepEqual(await Promise.all(tables.map((table) => f.db.getAllAsync(`SELECT * FROM ${table} ORDER BY id`))), before);
+    assert.deepEqual(await f.db.getFirstAsync('SELECT hex(original_code) AS original, hex(canonical_key) AS canonical FROM product_codes WHERE product_id = 3'), { original: 'EFBBBF5363616E007461696C20', canonical: 'EFBBBF5363616E007461696C20' });
+    await grocery.setProductArchived(1, true);
+    assert.deepEqual(await grocery.lookupCode(cameraCode({ type: 'ean13', data: '036000291452' }, 'ios')), { ...expected, archived: true });
+    const archived = await Promise.all(tables.map((table) => f.db.getAllAsync(`SELECT * FROM ${table} ORDER BY id`)));
+    await assert.rejects(grocery.saveProduct(catalog({ name: 'Code thief', brand: { name: 'Must roll back brand' }, grouping: { category: { name: 'Must roll back category' } }, savedStore: { name: 'Must roll back store' }, savedPrice: '4', code: cameraCode({ type: 'ean13', data: '0036000291452' }, 'android') })), /belongs to another/);
+    await assert.rejects(grocery.recordPurchase(input({ product: { id: 1 }, store: { id: 2 }, unitPrice: '2.000', quantity: '2' })), /active product/);
+    assert.deepEqual(await Promise.all(tables.map((table) => f.db.getAllAsync(`SELECT * FROM ${table} ORDER BY id`))), archived);
+    await grocery.setProductArchived(1, false);
+    const save = createSubmission();
+    const purchase = () => grocery.recordPurchase(input({ product: { id: 1 }, store: { id: 2 }, unitPrice: '2.000', quantity: '2' }));
+    await Promise.all([save(purchase), save(purchase)]);
+    await save(purchase);
+    assert.equal((await grocery.getMonth('2026-10')).total, 4000);
+    assert.deepEqual(await f.db.getAllAsync('SELECT product_id, brand_id, subcategory_id, store_id, quantity, unit_price FROM purchases'), [{ product_id: 1, brand_id: 1, subcategory_id: 1, store_id: 2, quantity: 2, unit_price: 2000 }]);
+    assert.deepEqual(await f.db.getFirstAsync('SELECT saved_price, saved_store_id FROM products WHERE id = 1'), { saved_price: 2000, saved_store_id: 1 });
+    assert.deepEqual(await f.db.getAllAsync('SELECT product_id, price, store_id, source, source_purchase_id FROM price_history ORDER BY id'), [{ product_id: 1, price: 2000, store_id: 1, source: 'saved_price', source_purchase_id: null }, { product_id: 2, price: 3000, store_id: 1, source: 'saved_price', source_purchase_id: null }]);
+    await createSubmission()(() => grocery.recordPurchase(input({ product: { id: 1 }, store: { id: 1 }, unitPrice: '2.000', quantity: '1' })));
+    const reopened = open(f.path);
+    try {
+      await initializeDatabase(reopened.db);
+      const persisted = createGrocery(reopened.db, now);
+      assert.equal((await persisted.getMonth('2026-10')).total, 6000);
+      assert.deepEqual(await persisted.lookupCode(cameraCode({ type: 'qr', data: qr }, 'ios')), { id: 3, name: 'Exact control QR', brand: null, archived: false });
+      assert.deepEqual(await reopened.db.getFirstAsync('SELECT saved_price, saved_store_id FROM products WHERE id = 1'), { saved_price: 2000, saved_store_id: 1 });
+      assert.deepEqual(await reopened.db.getAllAsync('PRAGMA foreign_key_check'), []);
+    } finally { reopened.close(); }
+  } finally { f.cleanup(); }
 });
 
 test('opaque QR retains whitespace, case, Unicode and NUL with a well-formed 4096 UTF-8 byte limit', () => {
