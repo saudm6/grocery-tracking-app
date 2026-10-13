@@ -149,7 +149,7 @@ function PurchaseEditor({ purchase, references, readReady, refresh, onCommitted 
       <Text accessibilityRole="alert">Delete recorded purchase {purchase.id} of {purchase.product} in {purchase.month}, worth {formatOMR(purchase.lineTotal)} OMR? This removes spending and discards unsaved corrections. Price history remains with its own product, price, store and period.</Text>
       <Action label={saving ? 'Deleting purchase…' : 'Delete receipt only'} disabled={saving || !readReady} onPress={() => { void commit('delete'); }} />
       {observation?.source === 'receipt' ? <>
-        <Text>Delete and apply inflation also removes linked receipt observation {observation.id} for {observation.product}. Remaining history is recalculated. Today&apos;s saved price and store stay unchanged.</Text>
+        <Text>Delete and apply inflation also removes this receipt&apos;s price history entry, observation {observation.id} for {observation.product}. Remaining history is recalculated. Today&apos;s saved price and store stay unchanged.</Text>
         <Action label="Delete and apply inflation" disabled={saving || !readReady} onPress={() => { void commit('deleteApply'); }} />
       </> : null}
       <Action label="Cancel purchase deletion" disabled={saving} onPress={() => setConfirmingDelete(false)} />
